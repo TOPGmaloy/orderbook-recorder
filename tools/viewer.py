@@ -50,6 +50,27 @@ def read_closed(files):
     return pa.concat_tables(tables)
 
 
+def contract_size(symbol):
+    """Сколько монет в одном контракте MEXC.
+
+    Объёмы в стакане и ленте приходят В КОНТРАКТАХ, а не в монетах и не в
+    долларах: у BTC_USDT контракт равен 0.0001 BTC, у ETH_USDT — 0.01 ETH.
+    Без этой поправки «плита 279k» читается как чушь, а на деле это 27.9 BTC.
+    """
+    fallback = {"BTC_USDT": 0.0001, "ETH_USDT": 0.01, "SOL_USDT": 0.1}
+    try:
+        import requests
+        body = requests.get("https://contract.mexc.com/api/v1/contract/detail",
+                            timeout=15).json()
+        for row in body.get("data") or []:
+            if row.get("symbol") == symbol:
+                return float(row["contractSize"])
+    except Exception as exc:
+        print(f"размер контракта не получен ({exc}) — беру из таблицы",
+              file=sys.stderr)
+    return fallback.get(symbol, 1.0)
+
+
 def load_rows(symbol):
     files = sorted(DATA_DIR.rglob("events_*.parquet"))
     if not files:
@@ -173,6 +194,7 @@ def build(symbol, minutes, step_ms, bins, depth_rows):
 
     return {
         "symbol": symbol,
+        "contract": contract_size(symbol),
         "start_ms": start_us // 1000,
         "step_ms": step_ms,
         "frames": n,
@@ -278,6 +300,8 @@ TEMPLATE = r"""<title>__TITLE__</title>
     <div class="side">
       <div class="card">
         <h2 id="lad-t">Стакан на конец окна</h2>
+        <p style="margin:-4px 0 8px;font-size:11px;color:var(--muted)">
+          объём в деньгах по номиналу</p>
         <table id="lad"></table>
       </div>
     </div>
@@ -291,6 +315,11 @@ TEMPLATE = r"""<title>__TITLE__</title>
   </div>
 
   <p class="note">
+    <b>Единицы.</b> Биржа отдаёт объёмы в контрактах, а не в монетах:
+    у BTC_USDT один контракт равен 0.0001 BTC. В лестнице справа пересчитано
+    в деньги — «$850k» значит, что на этой цене стоит заявок на 850 тысяч
+    долларов. Наведи на строку, чтобы увидеть контракты и монеты.
+    <br><br>
     <b>Как читать.</b> Тёмные горизонтальные полосы — плиты: объём, который
     стоит на одной цене. Плита, в которую бьют сделки и которая не тает, —
     это <b>поглощение</b>: кто-то крупный скупает всё, что в него льют.
@@ -326,7 +355,10 @@ TEMPLATE = r"""<title>__TITLE__</title>
     if (h.length === 3) h = h.split("").map(c => c + c).join("");
     return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
   };
-  const fmt = (v) => v >= 1e6 ? (v/1e6).toFixed(1)+"M" : v >= 1e3 ? (v/1e3).toFixed(0)+"k" : String(v);
+  const fmt = (v) => v >= 1e6 ? (v/1e6).toFixed(1)+"M" : v >= 1e3 ? (v/1e3).toFixed(0)+"k" : String(Math.round(v));
+  // Объёмы приходят в контрактах: у BTC_USDT контракт = 0.0001 BTC. Людям
+  // нужны деньги, а не контракты, поэтому в лестнице показываем номинал.
+  const usd = (contracts, px) => "$" + fmt(contracts * D.contract * px);
   const price = (b) => D.p_lo + (b + 0.5) * D.p_step;
   const clock = (f) => new Date(D.start_ms + f * D.step_ms)
         .toISOString().slice(11, 19);
@@ -476,8 +508,10 @@ TEMPLATE = r"""<title>__TITLE__</title>
       const isAsk = av >= bv;
       const cls = (b === bb || b === ba) ? ' class="touch"' : "";
       const pct = Math.round(v / peak * 100);
-      rows.push(`<tr${cls}><td class="p">${price(b).toFixed(D.p_step < 0.1 ? 2 : 1)}</td>` +
-        `<td class="n">${v ? fmt(v) : ""}</td><td class="bar">` +
+      const px = price(b);
+      const tip = v ? ` title="${fmt(v)} контрактов = ${(v*D.contract).toFixed(4)} ${D.coin}"` : "";
+      rows.push(`<tr${cls}${tip}><td class="p">${px.toFixed(D.p_step < 0.1 ? 2 : 1)}</td>` +
+        `<td class="n">${v ? usd(v, px) : ""}</td><td class="bar">` +
         (v ? `<div class="bx" style="width:${pct}%;background:${isAsk ? "var(--sell)" : "var(--buy)"};opacity:.55"></div>` : "") +
         `</td></tr>`);
     }
@@ -507,10 +541,13 @@ def render(data, fragment=False):
     title = f"Стакан {data['symbol'].replace('_', '/')}"
     sub = (f"Запись MEXC futures, {started:%Y-%m-%d %H:%M} UTC, "
            f"{minutes:.0f} мин, кадр {data['step_ms']} мс")
+    coin = data["symbol"].split("_")[0]
+    data["coin"] = coin
     chips = "".join(
         f'<span class="chip">{k} <b>{v}</b></span>' for k, v in [
             ("кадров", data["frames"]),
             ("сделок", data["trade_count"]),
+            ("контракт", f"{data['contract']:g} {coin}"),
             ("шаг цены", f"{data['p_step']:.2f}"),
             ("диапазон", f"{data['p_lo']:.1f} – {data['p_lo'] + data['p_step']*data['bins']:.1f}"),
         ])
