@@ -44,7 +44,8 @@ def contract_info(symbol):
                 return float(row["contractSize"]), max(0, digits)
     except Exception:
         pass
-    fallback = {"BTC_USDT": (0.0001, 1), "ETH_USDT": (0.01, 2), "SOL_USDT": (0.1, 2)}
+    fallback = {"BTC_USDT": (0.0001, 1), "ETH_USDT": (0.01, 2),
+                "SOL_USDT": (0.1, 2), "XAU_USDT": (0.001, 2)}
     return fallback.get(symbol, (1.0, 2))
 
 

@@ -57,7 +57,8 @@ def contract_size(symbol):
     долларах: у BTC_USDT контракт равен 0.0001 BTC, у ETH_USDT — 0.01 ETH.
     Без этой поправки «плита 279k» читается как чушь, а на деле это 27.9 BTC.
     """
-    fallback = {"BTC_USDT": 0.0001, "ETH_USDT": 0.01, "SOL_USDT": 0.1}
+    fallback = {"BTC_USDT": 0.0001, "ETH_USDT": 0.01, "SOL_USDT": 0.1,
+                "XAU_USDT": 0.001}
     try:
         import requests
         body = requests.get("https://contract.mexc.com/api/v1/contract/detail",
