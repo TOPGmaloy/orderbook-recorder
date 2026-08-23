@@ -87,7 +87,7 @@ if [[ "$STATE" == "active" ]]; then
     echo
     echo "  Команды:"
     echo "    отчёт        ${PYTHON} ${PROJECT_DIR}/tools/report.py"
-    echo "    журнал       journalctl -u orderbook-recorder -f"
+    echo "    журнал       tail -f ${PROJECT_DIR}/recorder.log"
     echo "    остановить   systemctl stop orderbook-recorder"
     echo
     echo "  Бот не тронут:"
@@ -95,6 +95,9 @@ if [[ "$STATE" == "active" ]]; then
 else
     echo "  НЕ ЗАПУСТИЛАСЬ — состояние: ${STATE}"
     echo "============================================================"
-    journalctl -u orderbook-recorder -n 25 --no-pager
+    journalctl -u orderbook-recorder -n 15 --no-pager
+    echo
+    echo "Последние строки собственного журнала:"
+    tail -n 25 "${PROJECT_DIR}/recorder.log" 2>/dev/null || echo "  (пока пуст)"
     exit 1
 fi
