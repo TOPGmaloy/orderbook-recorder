@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Короткая обёртка вокруг tools/analyze.py.
+#
+# Зачем: в браузерной консоли Hetzner длинная команда переносится по пробелу и
+# рвётся пополам — вместо запуска скрипта стартует интерактивный python. Здесь
+# команда короткая и переносить нечего.
+#
+#   cd /root/orderbook-recorder && ./analyze
+cd "$(dirname "$0")" || exit 1
+exec venv/bin/python tools/analyze.py "$@"

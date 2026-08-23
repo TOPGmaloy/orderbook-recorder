@@ -128,6 +128,19 @@ cd /root && git clone https://github.com/TOPGmaloy/orderbook-recorder.git && cd 
 cd /root/orderbook-recorder && git pull && systemctl restart orderbook-recorder
 ```
 
+## Короткие команды
+
+В браузерной консоли Hetzner длинные строки рвутся по пробелу, поэтому в корне
+проекта лежат обёртки. Все команды выполняются из каталога проекта:
+
+```bash
+cd /root/orderbook-recorder && ./report
+```
+
+`./report` — отчёт по записанному, `./analyze` — проверка предсказания,
+`./viewer` — тепловая карта в HTML, `./universe` — отбор пар, `./smoke` —
+60-секундная проверка.
+
 ## Работа с ним
 
 **[СЕРВЕР]** отчёт по записанному:
