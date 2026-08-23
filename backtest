@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Короткая обёртка вокруг tools/backtest.py — см. ./report
+cd "$(dirname "$0")" || exit 1
+exec venv/bin/python tools/backtest.py "$@"
