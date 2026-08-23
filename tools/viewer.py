@@ -106,6 +106,12 @@ def build(symbol, minutes, step_ms, bins, depth_rows):
         frames.append((next_ts, bid, ask))
 
     for r in rows:
+        # Дыра в записи: без этой проверки на карте появляется широкая полоса
+        # из тысяч одинаковых кадров с замороженной книгой, и выглядит она как
+        # штиль на рынке, а не как остановленная служба.
+        if next_ts is not None and r["ts_local_us"] - next_ts > 2_000_000:
+            next_ts = r["ts_local_us"]
+            book.reset()
         while next_ts is not None and r["ts_local_us"] >= next_ts + step_us:
             snap()
             next_ts += step_us
