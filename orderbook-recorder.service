@@ -1,0 +1,23 @@
+[Unit]
+# СПРАВОЧНАЯ КОПИЯ. Живой юнит пишет install_service.sh — он подставляет
+# реальный путь. Ставьте через него:
+#
+#     [СЕРВЕР]  cd /root/orderbook-recorder && bash install_service.sh
+#
+# Пути здесь совпадают с реальной установкой: root, /root/orderbook-recorder.
+Description=MEXC order book recorder (research data capture)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/orderbook-recorder
+ExecStart=/root/orderbook-recorder/venv/bin/python /root/orderbook-recorder/run.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/root/orderbook-recorder/recorder.log
+StandardError=append:/root/orderbook-recorder/recorder.log
+
+[Install]
+WantedBy=multi-user.target
