@@ -93,17 +93,19 @@ def compare_book(book, snapshot, levels, ambiguous, tol=1e-9):
             if price in ambiguous:
                 continue
             if price not in own_map:
-                return f"{side}: в снимке есть {price}, в книге нет"
+                return {"text": f"{side}: в снимке есть {price}, в книге нет",
+                        "missing": price}
             if abs(own_map[price] - volume) > tol:
-                return (f"{side} {price}: в книге {own_map[price]}, "
-                        f"в снимке {volume}")
+                return {"text": f"{side} {price}: в книге {own_map[price]}, "
+                                f"в снимке {volume}", "missing": None}
         if snap[side]:
             edge = min(p for p, _ in snap[side]) if side == "bids" \
                 else max(p for p, _ in snap[side])
             for price, volume in own[side]:
                 inside = price >= edge if side == "bids" else price <= edge
                 if inside and price not in ambiguous and price not in snap_map:
-                    return f"{side}: в книге есть лишний уровень {price}"
+                    return {"text": f"{side}: в книге есть лишний уровень {price}",
+                            "missing": None}
     return None
 
 
@@ -133,6 +135,7 @@ def check_integrity(rows, symbol, levels=20):
                 snaps.append((version, data))
 
     checks = matched = mismatched = incomplete = 0
+    holes = bugs = 0
     example = None
     for (va, snap_a), (vb, snap_b) in zip(snaps, snaps[1:]):
         if vb <= va:
@@ -140,6 +143,12 @@ def check_integrity(rows, symbol, levels=20):
         book = OrderBook(symbol)
         book.apply_snapshot(snap_a)
         ambiguous, reached, chain_ok = set(), False, True
+        # Все цены, которые мы вообще могли узнать к моменту сверки. Если
+        # недостающий уровень сюда не входит, книга не «сломалась» — этой цены
+        # просто никогда не было ни в снимке A (он обрезан по числу уровней),
+        # ни в одной пачке. Это дыра покрытия, лечится глубиной снимка.
+        seen = {float(level[0]) for side in ("bids", "asks")
+                for level in (snap_a.get(side) or [])}
 
         for begin, end, data in packs:
             if end <= va:
@@ -156,6 +165,8 @@ def check_integrity(rows, symbol, levels=20):
                              for level in (data.get(side) or [])}
                 reached = True
                 break
+            seen.update(float(level[0]) for side in ("bids", "asks")
+                        for level in (data.get(side) or []))
             book._merge(data)
             book.version = end
 
@@ -167,11 +178,16 @@ def check_integrity(rows, symbol, levels=20):
         problem = compare_book(book, snap_b, levels, ambiguous)
         if problem:
             mismatched += 1
-            example = example or problem
+            if problem["missing"] is not None and problem["missing"] not in seen:
+                holes += 1
+                problem["text"] += "  ← цены не было ни в снимке A, ни в пачках"
+            else:
+                bugs += 1
+            example = example or problem["text"]
         else:
             matched += 1
 
-    return checks, matched, mismatched, incomplete, example
+    return checks, matched, mismatched, incomplete, example, holes, bugs
 
 
 def main():
@@ -264,11 +280,15 @@ def main():
 
     print("\nПРОВЕРКА СБОРКИ (снимок A + все пачки == снимок B, топ-20 уровней)")
     for symbol in symbols:
-        checks, matched, mismatched, incomplete, example = check_integrity(rows, symbol)
+        (checks, matched, mismatched, incomplete, example,
+         holes, bugs) = check_integrity(rows, symbol)
         if checks:
             print(f"  {symbol:<12} сверок {checks:>4}, совпало {matched:>4}, "
                   f"разошлось {mismatched:>4} → {matched / checks * 100:5.1f}% годных"
                   + (f", неполных пар {incomplete}" if incomplete else ""))
+            if mismatched:
+                print(f"  {'':<12} из них дыр покрытия {holes}, "
+                      f"настоящих ошибок сборки {bugs}")
             if example:
                 print(f"  {'':<12} пример расхождения: {example}")
         else:
