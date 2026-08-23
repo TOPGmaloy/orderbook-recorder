@@ -58,7 +58,7 @@ def contract_size(symbol):
     Без этой поправки «плита 279k» читается как чушь, а на деле это 27.9 BTC.
     """
     fallback = {"BTC_USDT": 0.0001, "ETH_USDT": 0.01, "SOL_USDT": 0.1,
-                "XAU_USDT": 0.001}
+                "XAU_USDT": 0.001, "HYPE_USDT": 0.1, "XRP_USDT": 1.0}
     try:
         import requests
         body = requests.get("https://contract.mexc.com/api/v1/contract/detail",

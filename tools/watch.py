@@ -45,7 +45,7 @@ def contract_info(symbol):
     except Exception:
         pass
     fallback = {"BTC_USDT": (0.0001, 1), "ETH_USDT": (0.01, 2),
-                "SOL_USDT": (0.1, 2), "XAU_USDT": (0.001, 2)}
+                "SOL_USDT": (0.1, 2), "XAU_USDT": (0.001, 2), "HYPE_USDT": (0.1, 3), "XRP_USDT": (1.0, 4)}
     return fallback.get(symbol, (1.0, 2))
 
 

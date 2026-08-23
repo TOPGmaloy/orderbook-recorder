@@ -60,8 +60,8 @@ def decimals(step):
 
 def contract_info():
     sizes = {"BTC_USDT": 0.0001, "ETH_USDT": 0.01, "SOL_USDT": 0.1,
-             "XAU_USDT": 0.001}
-    digits = {"BTC_USDT": 1, "ETH_USDT": 2, "SOL_USDT": 2, "XAU_USDT": 2}
+             "XAU_USDT": 0.001, "HYPE_USDT": 0.1, "XRP_USDT": 1.0}
+    digits = {"BTC_USDT": 1, "ETH_USDT": 2, "SOL_USDT": 2, "XAU_USDT": 2, "HYPE_USDT": 3, "XRP_USDT": 4}
     try:
         body = requests.get("https://contract.mexc.com/api/v1/contract/detail",
                             timeout=15).json()
