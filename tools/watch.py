@@ -28,16 +28,24 @@ from recorder.book import OrderBook
 from recorder.mexc_ws import MexcFeed, fetch_snapshot
 
 
-def contract_size(symbol):
+def contract_info(symbol):
+    """Размер контракта и число знаков после запятой из шага цены.
+
+    Округлять по величине цены нельзя: у ETH цена 2472, но шаг 0.01, и при
+    одном знаке соседние уровни стакана сливаются в один.
+    """
     try:
         body = requests.get("https://contract.mexc.com/api/v1/contract/detail",
                             timeout=15).json()
         for row in body.get("data") or []:
             if row.get("symbol") == symbol:
-                return float(row["contractSize"])
+                text = f"{float(row['priceUnit']):.10f}".rstrip("0")
+                digits = len(text.split(".")[1]) if "." in text else 0
+                return float(row["contractSize"]), max(0, digits)
     except Exception:
         pass
-    return {"BTC_USDT": 0.0001, "ETH_USDT": 0.01, "SOL_USDT": 0.1}.get(symbol, 1.0)
+    fallback = {"BTC_USDT": (0.0001, 1), "ETH_USDT": (0.01, 2), "SOL_USDT": (0.1, 2)}
+    return fallback.get(symbol, (1.0, 2))
 
 
 def money(v):
@@ -54,7 +62,7 @@ class Watch:
         self.levels = levels
         self.refresh = refresh
         self.book = OrderBook(symbol)
-        self.contract = contract_size(symbol)
+        self.contract, self.digits = contract_info(symbol)
         self.tape = deque(maxlen=400)      # (ts, price, contracts, side)
         self.last_print = 0.0
         self.msgs = 0
@@ -91,7 +99,7 @@ class Watch:
         asks = sorted(self.book.asks)[:self.levels]
         peak = max([self.book.bids[p] for p in bids] +
                    [self.book.asks[p] for p in asks] + [1])
-        digits = 2 if mid < 1000 else 1
+        digits = self.digits
 
         out = []
         for p in reversed(asks):
