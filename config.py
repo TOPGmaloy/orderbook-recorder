@@ -26,13 +26,13 @@ REST_TIME = "https://contract.mexc.com/api/v1/contract/ping"
 # в ценовом диапазоне якоря, а на BTC 500 уровней — это всего ±50 USDT, цена
 # выходит за них за минуты. С 1000 уровней и якорем раз в 2 минуты сверка
 # сборки со снимком проходит на 93-100%.
-SNAPSHOT_LEVELS = 1000
+SNAPSHOT_LEVELS = 250
 
 # --- ритм -------------------------------------------------------------------
 
 PING_SECONDS = 15          # MEXC рвёт соединение примерно через минуту тишины
 STATS_SECONDS = 60         # как часто писать строку статистики в лог
-SNAPSHOT_SECONDS = 120     # принудительный снимок книги — якорь для проверки
+SNAPSHOT_SECONDS = 300     # принудительный снимок книги — якорь для проверки
 CLOCK_SECONDS = 600        # редкая сверка часов через REST; основной замер
                            # идёт по ping/pong, он точнее (см. _record_clock)
 RECONNECT_MAX_DELAY = 60   # потолок паузы между попытками переподключения
@@ -46,8 +46,13 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 # работающем диктофоне просто падал бы.
 ROTATE_MINUTES = 10
 
+# Уровень сжатия zstd. Замерено на живом потоке: 1 -> 308 МБ/сутки,
+# 9 -> 276, 19 -> 244. Процессор на сервере всё равно простаивает, а разница
+# в размере реальная, поэтому берём максимум. Информация не теряется.
+COMPRESSION_LEVEL = 19
+
 FLUSH_SECONDS = 10         # сброс буфера на диск не реже, чем раз в 10 секунд
-FLUSH_ROWS = 5000          # ...или каждые 5000 событий
+FLUSH_ROWS = 2000          # ...или каждые 2000 событий (потолок паузы на сжатие)
 RETENTION_DAYS = 14        # сырьё старше двух недель удаляем
 MIN_FREE_GB = 3.0          # ниже этого порога запись останавливается
 
@@ -59,3 +64,6 @@ MIN_FREE_GB = 3.0          # ниже этого порога запись ос�
 SYMBOLS = [s.strip() for s in os.getenv("OBR_SYMBOLS", ",".join(SYMBOLS)).split(",") if s.strip()]
 SNAPSHOT_SECONDS = int(os.getenv("OBR_SNAPSHOT_SECONDS", SNAPSHOT_SECONDS))
 ROTATE_MINUTES = int(os.getenv("OBR_ROTATE_MINUTES", ROTATE_MINUTES))
+RETENTION_DAYS = int(os.getenv("OBR_RETENTION_DAYS", RETENTION_DAYS))
+COMPRESSION_LEVEL = int(os.getenv("OBR_ZSTD", COMPRESSION_LEVEL))
+SNAPSHOT_LEVELS = int(os.getenv("OBR_SNAPSHOT_LEVELS", SNAPSHOT_LEVELS))

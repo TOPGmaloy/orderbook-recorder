@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 
 from config import (
     DATA_DIR, FLUSH_SECONDS, FLUSH_ROWS, RETENTION_DAYS, MIN_FREE_GB,
-    ROTATE_MINUTES,
+    ROTATE_MINUTES, COMPRESSION_LEVEL,
 )
 
 log = logging.getLogger("writer")
@@ -117,7 +117,8 @@ class Writer:
         while path.exists():
             path = day_dir / f"events_{key}.{n}.parquet"
             n += 1
-        self._writer = pq.ParquetWriter(path, SCHEMA, compression="zstd")
+        self._writer = pq.ParquetWriter(path, SCHEMA, compression="zstd",
+                                        compression_level=COMPRESSION_LEVEL)
         self._bucket = bucket
         log.info("новый файл: %s", path.name)
 
