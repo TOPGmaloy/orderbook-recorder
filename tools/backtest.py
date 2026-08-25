@@ -123,6 +123,7 @@ class Engine:
     side: int = 0
     trades: list = field(default_factory=list)
     impossible: int = 0     # исполнений выхода по цене, недостижимой в книге
+    samples: list = field(default_factory=list)   # первые такие случаи целиком
 
     def submit(self, now_us, side, price, size):
         """Заявка уходит на биржу и появится там только через lag."""
@@ -183,6 +184,14 @@ class Engine:
                             if (o.side == 1 and o.price > aa[0] + self.tick) or \
                                (o.side == 0 and o.price < bb[0] - self.tick):
                                 self.impossible += 1
+                                if len(self.samples) < 3:
+                                    self.samples.append({
+                                        "сторона": "продажа" if o.side == 1 else "покупка",
+                                        "цена заявки": o.price,
+                                        "цена сделки": price,
+                                        "бид": bb[0], "аск": aa[0],
+                                        "вход": self.entry_price,
+                                        "держали_с": round((now_us - self.entry_us) / 1e6, 1)})
                         self._close(now_us, o.price, "цель лимиткой", cost=0.0)
                     return
 
@@ -467,6 +476,7 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
     # Любая ошибка в учёте исполнений вылезает здесь сразу и наглядно.
     out["__path__"] = path_bp
     out["__impossible__"] = {name: engines[name].impossible for name, _, _ in runs}
+    out["__samples__"] = {name: engines[name].samples for name, _, _ in runs}
     return out
 
 

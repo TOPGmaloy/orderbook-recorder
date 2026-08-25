@@ -213,6 +213,7 @@ def report_one(symbol, a, result, runs, summary):
     spread_med, _ = result.pop("__spread__")
     path_bp = result.pop("__path__", 0.0)
     impossible = result.pop("__impossible__", {})
+    samples = result.pop("__samples__", {})
     print(f"  медианный спред {spread_med:.3f} б.п. — столько зарабатывает "
           f"круг «купил по биду, продал по аску»")
 
@@ -259,6 +260,8 @@ def report_one(symbol, a, result, runs, summary):
         if bad:
             print(f"    ИСПОЛНЕНИЙ ПО НЕДОСТИЖИМОЙ ЦЕНЕ: {bad} из {len(trades)} "
                   f"({bad/max(len(trades),1)*100:.0f}%)")
+            for ex in samples.get(name, [])[:2]:
+                print("      " + ", ".join(f"{k} {v}" for k, v in ex.items()))
 
     print("=" * 96)
     print("  Читать так: конструкция чего-то стоит, только если ср.б.п. положительно")
