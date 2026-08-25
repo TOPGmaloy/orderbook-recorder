@@ -224,7 +224,12 @@ class Engine:
         b, a = self.book.best()
         if not b or not a:
             return
-        mark = a[0] if self.side == 0 else b[0]      # выходим через спред
+        # Выход из ДЛИННОЙ позиции — это продажа, а продают по биду. Из
+        # короткой — покупка, покупают по аску. Было наоборот, и каждая сделка
+        # оценивалась на один спред лучше, чем на самом деле: на BTC это
+        # 0.013 б.п. и незаметно, на SOL 1.0 б.п. — сопоставимо со всем
+        # измеренным преимуществом.
+        mark = b[0] if self.side == 0 else a[0]
         move_bp = (mark / self.entry_price - 1) * 1e4 * (1 if self.side == 0 else -1)
         age = (now_us - self.entry_us) / 1e6
         reason = None
