@@ -38,42 +38,43 @@ def human(ts_us):
 
 
 def compare_book(book, snapshot, levels, ambiguous, tol=1e-9):
-    """Совпадает ли собранная книга со снимком по верхним уровням.
+    """Совпадает ли собранная книга со снимком по верхним уровням снимка.
 
-    `ambiguous` — цены из пачки, внутри которой снимок был сделан. Их сравнивать
-    нельзя: снимок мог застать эту пачку применённой наполовину. Всё остальное
-    обязано совпасть до последнего лота — расхождение означает ошибку сборки.
+    Сравнение идёт ПО ЦЕНАМ, а не по местам в рейтинге. Разница неочевидна и
+    оказалась решающей: раньше проверялось, входит ли цена из снимка в топ-20
+    НАШЕЙ книги. Стоит нашей книге содержать на пару уровней больше в том же
+    диапазоне — например из-за пачки, внутрь которой попал снимок и которую мы
+    поэтому не применяем, — как окно рейтинга съезжает, двадцатая цена снимка
+    из него выпадает, и идеально собранная книга объявляется сломанной. Так
+    получились 73-96% «годных» при нулевом числе настоящих ошибок.
+
+    `ambiguous` — цены из пачки, внутрь которой попал снимок: она могла быть
+    применена наполовину, сравнивать их нельзя.
     """
-    snap = {
-        "bids": sorted(((float(p), float(v)) for p, v, *_ in snapshot.get("bids") or []),
-                       key=lambda x: -x[0])[:levels],
-        "asks": sorted(((float(p), float(v)) for p, v, *_ in snapshot.get("asks") or []),
-                       key=lambda x: x[0])[:levels],
-    }
-    own = {
-        "bids": sorted(book.bids.items(), key=lambda x: -x[0])[:levels],
-        "asks": sorted(book.asks.items(), key=lambda x: x[0])[:levels],
-    }
-    for side in ("bids", "asks"):
-        own_map = dict(own[side])
-        snap_map = dict(snap[side])
-        for price, volume in snap[side]:
+    for side, sign in (("bids", -1), ("asks", 1)):
+        snap = sorted(((float(p), float(v)) for p, v, *_ in snapshot.get(side) or []),
+                      key=lambda kv: sign * kv[0])[:levels]
+        if not snap:
+            continue
+        own = book.bids if side == "bids" else book.asks
+        snap_map = dict(snap)
+        edge = snap[-1][0]
+
+        for price, volume in snap:
             if price in ambiguous:
                 continue
-            if price not in own_map:
+            if price not in own:
                 return {"text": f"{side}: в снимке есть {price}, в книге нет",
                         "missing": price}
-            if abs(own_map[price] - volume) > tol:
-                return {"text": f"{side} {price}: в книге {own_map[price]}, "
+            if abs(own[price] - volume) > tol:
+                return {"text": f"{side} {price}: в книге {own[price]}, "
                                 f"в снимке {volume}", "missing": None}
-        if snap[side]:
-            edge = min(p for p, _ in snap[side]) if side == "bids" \
-                else max(p for p, _ in snap[side])
-            for price, volume in own[side]:
-                inside = price >= edge if side == "bids" else price <= edge
-                if inside and price not in ambiguous and price not in snap_map:
-                    return {"text": f"{side}: в книге есть лишний уровень {price}",
-                            "missing": None}
+
+        for price in own:
+            inside = price >= edge if side == "bids" else price <= edge
+            if inside and price not in ambiguous and price not in snap_map:
+                return {"text": f"{side}: в книге есть лишний уровень {price}",
+                        "missing": None}
     return None
 
 
