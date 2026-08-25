@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+cd "$(dirname "$0")" || exit 1
+mkdir -p out
+venv/bin/python tools/reversal.py "$@" 2>&1 | tee "out/reversal.txt"
+exit "${PIPESTATUS[0]}"
