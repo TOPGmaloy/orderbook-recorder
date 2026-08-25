@@ -126,8 +126,13 @@ cd /root && git clone https://github.com/TOPGmaloy/orderbook-recorder.git && cd 
 **[СЕРВЕР]** обновиться после правок на маке:
 
 ```bash
-cd /root/orderbook-recorder && git pull && systemctl restart orderbook-recorder
+cd /root/orderbook-recorder && ./update
 ```
+
+`./update` тянет код, **доставляет зависимости** и перезапускает службы.
+Отдельный `git pull` для этого не годится: он приносит только код, и когда в
+проекте появляется новая библиотека, инструмент падает на импорте уже после
+обновления. `./update --keep` обновляет, не трогая службы.
 
 ## Память
 

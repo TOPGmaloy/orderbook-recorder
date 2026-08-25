@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Обновление на сервере одной командой: код, зависимости, службы.
+#
+# Зачем: git pull приносит только код. Когда в проекте появляется новая
+# библиотека, окружение остаётся старым, и инструмент падает на импорте уже
+# после обновления — так и случилось с numpy. Здесь зависимости
+# доставляются всегда.
+#
+#   ./update          обновить и перезапустить службы
+#   ./update --keep   обновить, службы не трогать
+
+set -u
+cd "$(dirname "$0")" || exit 1
+
+echo "==> Код"
+git pull || { echo "ОШИБКА: git pull не прошёл"; exit 1; }
+
+echo "==> Зависимости"
+venv/bin/pip install -q -r requirements.txt || {
+    echo "ОШИБКА: не удалось поставить зависимости"; exit 1; }
+venv/bin/python -c "import websockets, pyarrow, requests, certifi, numpy" || {
+    echo "ОШИБКА: чего-то всё ещё не хватает"; exit 1; }
+echo "    всё на месте"
+
+if [[ "${1:-}" == "--keep" ]]; then
+    echo "==> Службы не трогаю (--keep)"
+    exit 0
+fi
+
+echo "==> Службы"
+for unit in orderbook-recorder orderbook-dashboard; do
+    if systemctl list-unit-files | grep -q "^${unit}"; then
+        systemctl restart "$unit"
+        printf '    %-22s %s\n' "$unit" "$(systemctl is-active "$unit")"
+    fi
+done
+
+echo
+echo "Бот не тронут: trading-bot: $(systemctl is-active trading-bot 2>/dev/null || echo '—')"
