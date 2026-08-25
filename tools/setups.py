@@ -241,6 +241,53 @@ def stat(arr, stamps, col):
             "blocks": blocks, "first": halves[0], "second": halves[1]}
 
 
+def sweep_scan(symbol, arr, stamps, meta, span_h, compact=False):
+    """Таблица «сила свипа против отработки». Главная проверка на подлинность."""
+    if len(arr) < 20:
+        print(f"  {symbol:<12} событий мало ({len(arr)}), сравнивать нечего")
+        return None
+    spans = np.array([m["span"] for m in meta])
+    best = None
+    rows = []
+    for th in (1.5, 2.5, 4.0, 6.0, 9.0, 13.0, 20.0):
+        mask = spans >= th
+        if mask.sum() < 6:
+            continue
+        sub, sub_ts = arr[mask][:, 2], stamps[mask]
+        good = np.isfinite(sub)
+        sub, sub_ts = sub[good], sub_ts[good]
+        if len(sub) < 6:
+            continue
+        t_val, _ = block_t(sub, sub_ts) if len(sub) >= 10 else (float("nan"), 0)
+        cut = sub_ts.min() + (sub_ts.max() - sub_ts.min()) / 2
+        h1 = sub[sub_ts < cut]
+        h2 = sub[sub_ts >= cut]
+        rows.append({"th": th, "n": len(sub), "per_day": len(sub) / max(span_h, 1) * 24,
+                     "mean": float(sub.mean()), "t": t_val,
+                     "h1": float(h1.mean()) if len(h1) >= 3 else float("nan"),
+                     "h2": float(h2.mean()) if len(h2) >= 3 else float("nan")})
+    if not rows:
+        return None
+    strict = rows[-1]
+    grows = len(rows) >= 2 and rows[-1]["mean"] > rows[0]["mean"]
+    same_sign = (np.sign(strict["h1"]) == np.sign(strict["h2"])
+                 and np.isfinite(strict["h1"]) and np.isfinite(strict["h2"]))
+    if compact:
+        mark = ""
+        if grows and same_sign and strict["mean"] > 1.0:
+            mark = "  <-- растёт, знак совпал"
+        print(f"  {symbol:<12}{strict['th']:>7.1f}{strict['n']:>8}"
+              f"{strict['per_day']:>9.0f}{strict['mean']:>10.2f}{strict['t']:>7.2f}"
+              f"{strict['h1']:>9.2f}{strict['h2']:>9.2f}{mark}")
+    else:
+        print(f"    {'порог':<8}{'событий':>8}{'/сутки':>8}"
+              f"{'60с ср.':>9}{'t':>6}{'1-я пол.':>10}{'2-я пол.':>10}")
+        for r in rows:
+            print(f"    {r['th']:<8.1f}{r['n']:>8}{r['per_day']:>8.0f}"
+                  f"{r['mean']:>9.3f}{r['t']:>6.2f}{r['h1']:>10.2f}{r['h2']:>10.2f}")
+    return {"symbol": symbol, "grows": grows, "same_sign": same_sign, **strict}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -254,6 +301,38 @@ def main():
     ap.add_argument("--wall-size", type=float, default=30000)
     ap.add_argument("--wall-near-bp", type=float, default=5.0)
     a = ap.parse_args()
+
+    from config import SYMBOLS
+    if a.symbol == "all":
+        print("=" * 92)
+        print("  СВИП С ВОЗВРАТОМ ПО ВСЕМ ИНСТРУМЕНТАМ — независимые выборки")
+        print("  Если это механизм стакана, он проявится не только на BTC.")
+        print("=" * 92)
+        print(f"  {'инструмент':<12}{'порог':>7}{'событий':>8}{'/сутки':>9}"
+              f"{'60с ср.':>10}{'t':>7}{'1-я пол.':>9}{'2-я пол.':>9}")
+        found = []
+        for sym in SYMBOLS:
+            cfg_all = {"absorb_k": 99, "absorb_window_s": a.absorb_window,
+                       "sweep_bp": a.sweep_bp, "reclaim_s": a.reclaim_s,
+                       "wall_size": 1e18, "wall_near_bp": a.wall_near_bp}
+            mids_s, ev = collect(sym, a.hours, cfg_all)
+            if len(mids_s) < 1000:
+                print(f"  {sym:<12} данных мало")
+                continue
+            r = forward(mids_s, ev, [5, 30, 60, 300], a.lag_ms)
+            arr, stamps, meta = r["свип с возвратом"]
+            span = (mids_s[-1][0] - mids_s[0][0]) / 1e6 / 3600
+            out = sweep_scan(sym, arr, stamps, meta, span, compact=True)
+            if out:
+                found.append(out)
+        good = [f for f in found if f["grows"] and f["same_sign"] and f["mean"] > 1.0]
+        print("=" * 92)
+        print(f"  Условие выполнено на {len(good)} инструментах из {len(found)}:"
+              f" {', '.join(f['symbol'] for f in good) or '—'}")
+        print("  Одно совпадение — случайность. Совпадение на трёх и более")
+        print("  инструментах с разным потоком — уже свойство механизма.")
+        print("=" * 92)
+        return
 
     cfg = {"absorb_k": a.absorb_k, "absorb_window_s": a.absorb_window,
            "sweep_bp": a.sweep_bp, "reclaim_s": a.reclaim_s,
