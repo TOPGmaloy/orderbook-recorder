@@ -100,6 +100,8 @@ def main():
     ap.add_argument("--lag-ms", type=int, default=200)
     ap.add_argument("--taker-bp", type=float, default=1.0)
     ap.add_argument("--notional", type=float, default=2500)
+    ap.add_argument("--full", action="store_true",
+                    help="гонять и заведомо мёртвые конструкции (медленнее втрое)")
     ap.add_argument("--profile", action="store_true",
                     help="показать, где уходит время (берите с --hours 2)")
     a = ap.parse_args()
@@ -158,7 +160,12 @@ def build_runs(a):
             "imb_th": 0.4, "ofi_th": 0.0, "move_th": 3.0, "delta_th": 2.0}
 
     runs = []
-    for name, stop, target, timer, th in GRID:
+    # По умолчанию считаем только живое. Восемь пассивных конструкций и
+    # четыре разворотных проверены и убыточны на всех инструментах и обеих
+    # половинах — гонять их каждый раз значит втрое дольше ждать ради
+    # подтверждения давно известного. Возвращаются флагом --full.
+    grid = GRID if getattr(a, "full", False) else GRID[:1]
+    for name, stop, target, timer, th in grid:
         params = dict(base, stop_bp=stop, target_bp=target,
                       time_stop_s=timer, imb_th=th)
         runs.append((name, params, strategy(params)))
@@ -172,12 +179,13 @@ def build_runs(a):
     # конструкции на потоке сделок: горизонт минут, цели в разы больше.
     # Раньше все цели были 2-6 б.п. при удержании минуту — там издержки
     # съедали всё независимо от сигнала.
-    for delta_th, target, stop, timer in ((2.0, 8, 16, 300), (3.0, 8, 16, 300),
-                                          (3.0, 15, 25, 900), (2.0, 15, 25, 900)):
-        params = dict(base, stop_bp=stop, target_bp=target,
-                      time_stop_s=timer, delta_th=delta_th)
-        runs.append((f"поток {delta_th:g}сигм/цель {target}/{timer//60}мин",
-                     params, delta_strategy(params)))
+    if getattr(a, "full", False):
+        for delta_th, target, stop, timer in ((2.0, 8, 16, 300), (3.0, 8, 16, 300),
+                                              (3.0, 15, 25, 900), (2.0, 15, 25, 900)):
+            params = dict(base, stop_bp=stop, target_bp=target,
+                          time_stop_s=timer, delta_th=delta_th)
+            runs.append((f"поток {delta_th:g}сигм/цель {target}/{timer//60}мин",
+                         params, delta_strategy(params)))
     # То же по потоку, но вход ПО РЫНКУ. Пассивно войти в моментум нельзя:
     # если покупатели забирают по аску, лимитку на биде исполнят только когда
     # цена вернётся, то есть исключительно на неудачных сигналах.
