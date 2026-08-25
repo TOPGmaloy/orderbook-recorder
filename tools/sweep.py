@@ -54,7 +54,7 @@ def split_stats(trades, cutoff_us):
     out = []
     for chunk in ([t for t in trades if t.entry_us < cutoff_us],
                   [t for t in trades if t.entry_us >= cutoff_us]):
-        if len(chunk) < 2:
+        if len(chunk) < 5:
             out.append(None)
             continue
         x = np.array([t.pnl_bp for t in chunk])
@@ -138,6 +138,15 @@ def build_runs(a):
         params = dict(base, stop_bp=stop, target_bp=target,
                       time_stop_s=timer, delta_th=delta_th)
         runs.append((f"поток {delta_th:g}сигм/цель {target}/{timer//60}мин",
+                     params, delta_strategy(params)))
+    # То же по потоку, но вход ПО РЫНКУ. Пассивно войти в моментум нельзя:
+    # если покупатели забирают по аску, лимитку на биде исполнят только когда
+    # цена вернётся, то есть исключительно на неудачных сигналах.
+    for delta_th, target, stop, timer in ((2.0, 8, 16, 300), (3.0, 8, 16, 300),
+                                          (3.0, 15, 25, 900), (4.0, 20, 30, 900)):
+        params = dict(base, stop_bp=stop, target_bp=target, time_stop_s=timer,
+                      delta_th=delta_th, taker_entry=True)
+        runs.append((f"поток ПО РЫНКУ {delta_th:g}с/цель {target}/{timer//60}м",
                      params, delta_strategy(params)))
     control = dict(base, stop_bp=999, target_bp=3, time_stop_s=60)
     runs.append(("СЛУЧАЙНЫЙ ВХОД", control, random_control(0.01)))

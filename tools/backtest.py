@@ -110,12 +110,14 @@ class Engine:
     lag_us: int
 
     maker_exit: bool = True
+    taker_entry: bool = False   # идти за движением можно только по рынку
     tick: float = 0.01
     book: OrderBook = None
     order: RestingOrder = None
     exit_order: RestingOrder = None
     pending: list = field(default_factory=list)   # заявки, ещё летящие на биржу
     position: float = 0.0
+    entry_cost_bp: float = 0.0
     entry_price: float = 0.0
     entry_us: int = 0
     side: int = 0
@@ -130,6 +132,16 @@ class Engine:
     def activate(self, now_us):
         while self.pending and self.pending[0][0] <= now_us:
             _, side, price, size = self.pending.pop(0)
+            if self.taker_entry:
+                # По рынку: покупаем по аску, продаём по биду. Дороже на
+                # комиссию и спред, зато исполняемся ВСЕГДА — а не только
+                # тогда, когда движение пошло против нас.
+                b, a = self.book.best()
+                if not b or not a:
+                    continue
+                self.entry_cost_bp = self.taker_bp
+                self._open(now_us, side, a[0] if side == 0 else b[0], size)
+                continue
             level = self.book.bids if side == 0 else self.book.asks
             ahead = level.get(price, 0.0)
             self.order = RestingOrder(side, price, size, ahead, now_us)
@@ -197,10 +209,12 @@ class Engine:
 
     def _close(self, now_us, price, reason, cost):
         move_bp = (price / self.entry_price - 1) * 1e4 * (1 if self.side == 0 else -1)
+        total = cost + self.entry_cost_bp
         self.trades.append(Trade(self.entry_us, now_us, self.side,
                                  self.entry_price, price, self.position, reason,
-                                 pnl_bp=move_bp - cost, cost_bp=cost))
+                                 pnl_bp=move_bp - total, cost_bp=total))
         self.position = 0.0
+        self.entry_cost_bp = 0.0
         self.exit_order = None
 
     def manage(self, now_us):
@@ -263,6 +277,7 @@ def _replay_gen(symbol, base, runs, seed=0):
                      time_stop_s=params["time_stop_s"],
                      lag_us=params["lag_ms"] * 1000,
                      maker_exit=not params.get("taker_exit", False),
+                     taker_entry=params.get("taker_entry", False),
                      tick=tick)
         eng.book = book
         engines[name] = eng
