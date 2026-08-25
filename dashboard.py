@@ -177,6 +177,10 @@ class Live:
                 "count5": len(recent),
                 "digits": self.digits.get(s, 2),
                 "sigma_bp": sigma,
+                # сколько секунд истории уже набрано: без этого первые полторы
+                # минуты после перезапуска страница показывает прочерк без
+                # объяснения, и это выглядит как поломка
+                "warm": len(self.mid_hist[s]), "warm_need": 90,
                 # плата за невыгодные исполнения по нашему же замеру:
                 # 0.209 от собственной сигмы инструмента (r = 0.966 на шести)
                 "cost_bp": sigma * 0.209 if sigma else None,
@@ -352,7 +356,7 @@ async function tick(){
     const imb=d.imbalance;
     const fee=d.cost_bp!=null
       ? `<span class="fee" title="0.209 от сигмы инструмента — наш замер">плата за вход <b>${d.cost_bp.toFixed(2)}</b> б.п.</span>`
-      : `<span class="fee">плата за вход — считаю…</span>`;
+      : `<span class="fee">плата за вход — набираю историю <b>${d.warm||0}</b>/${d.warm_need||90} с</span>`;
     return `<div class="dom">
       <div class="head"><span class="sym">${sym.replace("_","/")}</span>
         <span class="px">${d.mid.toFixed(d.digits)}</span></div>
