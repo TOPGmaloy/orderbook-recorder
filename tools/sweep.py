@@ -29,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from tools.backtest import (replay_multi, strategy, reversal_strategy,
-                            delta_strategy, random_control)
+from tools.backtest import (replay_multi, replay_all, strategy,
+                            reversal_strategy, delta_strategy,
+                            random_control)
 
 # Конструкции выбраны из измеренной динамики, а не перебором:
 # медиана движения за 60 с — 2.155 б.п., поэтому стоп в 2 б.п. стоит внутри
@@ -82,8 +83,19 @@ def main():
     from config import SYMBOLS
     targets = SYMBOLS if a.symbol == "all" else [a.symbol]
     summary = []
-    for target in targets:
-        run_one(target, a, summary)
+    base, runs = build_runs(a)
+    if len(targets) > 1:
+        # один проход по файлам на все инструменты: раньше каждый читал
+        # запись заново, и перебор по восьми занимал полчаса
+        results = replay_all(targets, base, {s: runs for s in targets})
+        for target in targets:
+            if target in results:
+                report_one(target, a, results[target], runs, summary)
+            else:
+                print(f"\n  {target}: данных нет")
+    else:
+        for target in targets:
+            report_one(target, a, replay_multi(target, base, runs), runs, summary)
     if len(targets) > 1:
         print("\n" + "=" * 96)
         print("  СВОДКА: лучшая конструкция по каждому инструменту")
@@ -100,7 +112,7 @@ def main():
         print("=" * 96)
 
 
-def run_one(symbol, a, summary):
+def build_runs(a):
     base = {"hours": a.hours, "lag_ms": a.lag_ms, "step_ms": 200,
             "taker_bp": a.taker_bp, "size": 1.0, "order_life_s": 10,
             "stop_bp": 2, "target_bp": 2, "time_stop_s": 60,
@@ -130,12 +142,15 @@ def run_one(symbol, a, summary):
     control = dict(base, stop_bp=999, target_bp=3, time_stop_s=60)
     runs.append(("СЛУЧАЙНЫЙ ВХОД", control, random_control(0.01)))
 
+    return base, runs
+
+
+def report_one(symbol, a, result, runs, summary):
     print("\n" + "=" * 96)
     print(f"  {symbol}   последние {a.hours:g} ч   задержка {a.lag_ms} мс   "
           f"выход по рынку {a.taker_bp} б.п.   номинал ${a.notional:,.0f}")
     print("=" * 96)
 
-    result = replay_multi(symbol, base, runs)
     spread_med, _ = result.pop("__spread__")
     print(f"  медианный спред {spread_med:.3f} б.п. — столько зарабатывает "
           f"круг «купил по биду, продал по аску»")

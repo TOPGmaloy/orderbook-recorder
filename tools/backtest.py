@@ -233,7 +233,7 @@ def replay(symbol, p, decide, seed=0):
     return out["одна"]
 
 
-def replay_multi(symbol, base, runs, seed=0):
+def _replay_gen(symbol, base, runs, seed=0):
     """Много конструкций за ОДИН проход по записи.
 
     Чтение и сборка книги — самая дорогая часть, и она общая для всех
@@ -244,7 +244,6 @@ def replay_multi(symbol, base, runs, seed=0):
     свой движок и своя позиция, они друг о друге не знают.
     """
     p = base
-    rows = events(symbol, p.get("hours"))
     rng = np.random.default_rng(seed)
     tick = tick_size(symbol)
     book = OrderBook(symbol)
@@ -277,7 +276,12 @@ def replay_multi(symbol, base, runs, seed=0):
 
     holes = downtime(p.get("hours"))
     hole_index = 0
-    for r in rows:
+    # Строки подаются снаружи через send(): так один проход по файлам кормит
+    # сразу все инструменты, вместо того чтобы каждый читал запись заново.
+    while True:
+        r = yield
+        if r is None:
+            break
         ts = r["ts_local_us"]
         # Рвём только на настоящем простое записи. Тишина по инструменту —
         # это просто спокойный рынок, позицию в ней держать можно.
@@ -398,6 +402,58 @@ def replay_multi(symbol, base, runs, seed=0):
     out = {name: (engines[name].trades, signals[name]) for name, _, _ in runs}
     out["__spread__"] = (sorted(spreads)[len(spreads) // 2] if spreads else 0.0,
                          len(spreads))
+    return out
+
+
+def _drive(gen, rows):
+    """Прокачать генератор строками и забрать результат."""
+    next(gen)
+    for r in rows:
+        gen.send(r)
+    try:
+        gen.send(None)
+    except StopIteration as stop:
+        return stop.value
+    return None
+
+
+def replay_multi(symbol, base, runs, seed=0):
+    """Много конструкций на одном инструменте за один проход по записи."""
+    return _drive(_replay_gen(symbol, base, runs, seed),
+                  events(symbol, base.get("hours")))
+
+
+def replay_all(symbols, base, runs_by_symbol, seed=0):
+    """Все инструменты за ОДИН проход по файлам.
+
+    Раньше каждый инструмент читал запись заново: восемь инструментов —
+    восемь распаковок полугигабайта, отсюда получасовой перебор. Здесь поток
+    читается один раз, строки раскладываются по инструментам, и каждый
+    обрабатывается своим набором движков.
+
+    Строки НЕ накапливаются: каждая сразу уходит в свой генератор. Собрать их
+    в списки по инструментам было бы проще, но суточная запись в виде объектов
+    Python — это гигабайты, и сервер бы не пережил.
+    """
+    gens = {}
+    for sym in symbols:
+        if sym not in runs_by_symbol:
+            continue
+        gen = _replay_gen(sym, base, runs_by_symbol[sym], seed)
+        next(gen)                       # довести до первого yield
+        gens[sym] = gen
+
+    for r in stream(hours=base.get("hours"), progress=True):
+        gen = gens.get(r["symbol"])
+        if gen is not None:
+            gen.send(r)
+
+    out = {}
+    for sym, gen in gens.items():
+        try:
+            gen.send(None)
+        except StopIteration as stop:
+            out[sym] = stop.value
     return out
 
 
