@@ -33,6 +33,7 @@ from recorder.mexc_ws import MexcFeed, fetch_snapshot
 ROOT = Path(__file__).resolve().parent
 PORT = int(os.getenv("OBR_DASH_PORT", "8080"))
 TOKEN_FILE = ROOT / "dashboard_token.txt"
+OUT_DIR = ROOT / "out"          # сюда обёртки складывают выводы инструментов
 
 STATE = {"symbols": {}, "status": {}}     # читается сервером, пишется циклом
 
@@ -277,8 +278,36 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif path == f"{self.secret}/state.json":
             self._send(200, json.dumps(STATE), "application/json")
+        elif path == f"{self.secret}/out":
+            self._send(200, self._listing(), "text/html; charset=utf-8")
+        elif path.startswith(f"{self.secret}/out/"):
+            self._send_out(path.rsplit("/", 1)[-1])
         else:
             self._send(404, "not found", "text/plain")
+
+    def _listing(self):
+        """Что лежит в out/ — выводы инструментов, сохранённые обёртками."""
+        items = []
+        for f in sorted(OUT_DIR.glob("*.txt")) if OUT_DIR.exists() else []:
+            size = f.stat().st_size
+            items.append(f'<li><a href="out/{f.name}">{f.name}</a> '
+                         f'— {size/1000:.0f} КБ</li>')
+        body = "".join(items) or "<li>пока пусто — запусти любой инструмент</li>"
+        return ("<meta charset='utf-8'><title>Выводы инструментов</title>"
+                "<body style='font:14px system-ui;padding:20px'>"
+                f"<h1>out/</h1><ul>{body}</ul></body>")
+
+    def _send_out(self, name):
+        """Только простые имена и только .txt: ни путей, ни выхода из каталога."""
+        if "/" in name or "\\" in name or ".." in name or not name.endswith(".txt"):
+            self._send(404, "not found", "text/plain")
+            return
+        target = OUT_DIR / name
+        if not target.is_file():
+            self._send(404, "not found", "text/plain")
+            return
+        self._send(200, target.read_text(errors="replace"),
+                   "text/plain; charset=utf-8")
 
     def log_message(self, *args):
         pass          # не засоряем журнал каждым опросом раз в секунду
@@ -297,6 +326,7 @@ def main():
     except Exception:
         ip = "<IP-сервера>"
     print(f"Страница: http://{ip}:{PORT}/{secret}", flush=True)
+    print(f"Выводы инструментов: http://{ip}:{PORT}/{secret}/out", flush=True)
     print("Без токена в адресе страница не открывается. Ссылку не публикуй.",
           flush=True)
     asyncio.run(collector())

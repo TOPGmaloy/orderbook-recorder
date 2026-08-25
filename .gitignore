@@ -4,3 +4,4 @@ __pycache__/
 *.log
 viewer*.html
 dashboard_token.txt
+out/

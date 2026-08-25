@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
-# Короткая обёртка вокруг tools/backtest.py — см. ./report
+# Короткая обёртка вокруг tools/backtest.py.
+#
+# Зачем обёртка: в браузерной консоли Hetzner длинная команда переносится по
+# пробелу и рвётся пополам — вместо запуска скрипта стартует интерактивный
+# python. Здесь переносить нечего.
+#
+# Вывод дублируется в out/backtest.txt, откуда его отдаёт страница на 8080 — так
+# результат можно прочитать в браузере, не переписывая с экрана.
 cd "$(dirname "$0")" || exit 1
-exec venv/bin/python tools/backtest.py "$@"
+mkdir -p out
+venv/bin/python tools/backtest.py "$@" 2>&1 | tee "out/backtest.txt"
+exit "${PIPESTATUS[0]}"
