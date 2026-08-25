@@ -127,7 +127,10 @@ def collect(symbol, hours, cfg):
             elif swept is not None:
                 age = (ts - swept[0]) / 1e6
                 back = abs(mid - swept[2]) / mid * 1e4
-                if age <= cfg["reclaim_s"] and back <= cfg["sweep_bp"] * 0.4:
+                # возврат меряем ДОЛЕЙ самого свипа, а не фиксированным
+                # порогом: иначе для крупного свипа требуется возврат почти
+                # в ноль, и крупные события просто не срабатывают
+                if age <= cfg["reclaim_s"] and back <= swept[3] * 0.4:
                     events["свип с возвратом"].append(
                         (ts, swept[1],
                          {"span": swept[3], "back_ratio": back / swept[3]}))
@@ -161,6 +164,31 @@ def collect(symbol, hours, cfg):
                            if abs(p - mid) / mid * 1e4 < 50}
 
     return mids, events
+
+
+def own_scale(mids, horizon_s=60, sample=4000, seed=1):
+    """Собственная волатильность инструмента: медиана |движения| за горизонт.
+
+    Мерить силу события в базисных пунктах нельзя — эта единица одинакова для
+    наблюдателя и бессмысленна для рынка. У SOL один шаг цены равен 1.05 б.п.,
+    у BTC 0.013 б.п., разница в восемьдесят раз. Порог «9 б.п.» на SOL это
+    девять тиков, то есть рябь, а на BTC — сотни тиков, то есть настоящий
+    свип. Сравнивать такие события между собой бессмысленно.
+
+    Нормируем на собственную волатильность: «свип силой 3 сигмы» означает одно
+    и то же везде. Это ОДНО правило для всех, а не подбор порога под каждую
+    пару — подгонка нам не нужна.
+    """
+    ts = np.array([t for t, _ in mids], dtype=np.int64)
+    mid = np.array([m for _, m in mids])
+    rng = np.random.default_rng(seed)
+    picks = rng.choice(len(ts) - 1, size=min(sample, len(ts) - 1), replace=False)
+    moves = []
+    for i in picks:
+        end = np.searchsorted(ts, ts[i] + int(horizon_s * 1e6))
+        if end < len(ts):
+            moves.append(abs(mid[end] / mid[i] - 1) * 1e4)
+    return float(np.median(moves)) if moves else float("nan")
 
 
 def block_t(values, stamps, block_s=300):
@@ -241,15 +269,18 @@ def stat(arr, stamps, col):
             "blocks": blocks, "first": halves[0], "second": halves[1]}
 
 
-def sweep_scan(symbol, arr, stamps, meta, span_h, compact=False):
+def sweep_scan(symbol, arr, stamps, meta, span_h, sigma=None, compact=False):
     """Таблица «сила свипа против отработки». Главная проверка на подлинность."""
     if len(arr) < 20:
         print(f"  {symbol:<12} событий мало ({len(arr)}), сравнивать нечего")
         return None
-    spans = np.array([m["span"] for m in meta])
-    best = None
+    spans_bp = np.array([m["span"] for m in meta])
+    # сила события в собственных сигмах инструмента, а не в б.п.
+    spans = spans_bp / sigma if sigma and sigma > 0 else spans_bp
+    thresholds = (1.0, 1.5, 2.0, 3.0, 4.5, 6.0, 9.0) if sigma \
+        else (1.5, 2.5, 4.0, 6.0, 9.0, 13.0, 20.0)
     rows = []
-    for th in (1.5, 2.5, 4.0, 6.0, 9.0, 13.0, 20.0):
+    for th in thresholds:
         mask = spans >= th
         if mask.sum() < 6:
             continue
@@ -276,9 +307,9 @@ def sweep_scan(symbol, arr, stamps, meta, span_h, compact=False):
         mark = ""
         if grows and same_sign and strict["mean"] > 1.0:
             mark = "  <-- растёт, знак совпал"
-        print(f"  {symbol:<12}{strict['th']:>7.1f}{strict['n']:>8}"
-              f"{strict['per_day']:>9.0f}{strict['mean']:>10.2f}{strict['t']:>7.2f}"
-              f"{strict['h1']:>9.2f}{strict['h2']:>9.2f}{mark}")
+        print(f"  {symbol:<12}{(sigma or 0):>7.2f}{strict['th']:>7.1f}"
+              f"{strict['n']:>8}{strict['per_day']:>8.0f}{strict['mean']:>9.2f}"
+              f"{strict['t']:>7.2f}{strict['h1']:>8.2f}{strict['h2']:>8.2f}{mark}")
     else:
         print(f"    {'порог':<8}{'событий':>8}{'/сутки':>8}"
               f"{'60с ср.':>9}{'t':>6}{'1-я пол.':>10}{'2-я пол.':>10}")
@@ -308,8 +339,10 @@ def main():
         print("  СВИП С ВОЗВРАТОМ ПО ВСЕМ ИНСТРУМЕНТАМ — независимые выборки")
         print("  Если это механизм стакана, он проявится не только на BTC.")
         print("=" * 92)
-        print(f"  {'инструмент':<12}{'порог':>7}{'событий':>8}{'/сутки':>9}"
-              f"{'60с ср.':>10}{'t':>7}{'1-я пол.':>9}{'2-я пол.':>9}")
+        print("  Порог — в СОБСТВЕННЫХ сигмах инструмента (медиана |движения|")
+        print("  за 60 с), а не в базисных пунктах: одно правило для всех.")
+        print(f"  {'инструмент':<12}{'сигма':>7}{'порог':>7}{'событий':>8}"
+              f"{'/сутки':>8}{'60с ср.':>9}{'t':>7}{'1-я':>8}{'2-я':>8}")
         found = []
         for sym in SYMBOLS:
             cfg_all = {"absorb_k": 99, "absorb_window_s": a.absorb_window,
@@ -322,7 +355,11 @@ def main():
             r = forward(mids_s, ev, [5, 30, 60, 300], a.lag_ms)
             arr, stamps, meta = r["свип с возвратом"]
             span = (mids_s[-1][0] - mids_s[0][0]) / 1e6 / 3600
-            out = sweep_scan(sym, arr, stamps, meta, span, compact=True)
+            sigma = own_scale(mids_s)
+            out = sweep_scan(sym, arr, stamps, meta, span, sigma=sigma,
+                             compact=True)
+            if out:
+                out["sigma"] = sigma
             if out:
                 found.append(out)
         good = [f for f in found if f["grows"] and f["same_sign"] and f["mean"] > 1.0]
@@ -376,17 +413,20 @@ def main():
 
     # --- скан по силе свипа ------------------------------------------------
     arr, stamps, meta = res.get("свип с возвратом", (np.empty((0, 4)), None, []))
+    sigma_one = own_scale(mids)
     if len(arr) >= 30:
         print("\n" + "=" * 92)
         print("  СКАН ПО СИЛЕ СВИПА — главная проверка на подлинность")
         print("  Если преимущество РАСТЁТ со строгостью порога, эффект настоящий.")
         print("  Если не растёт или падает — мы ловим шум, а не событие.")
         print("=" * 92)
-        spans = np.array([m["span"] for m in meta])
+        print(f"  Собственная сигма инструмента: {sigma_one:.2f} б.п. "
+              f"(медиана |движения| за 60 с)")
+        spans = np.array([m["span"] for m in meta]) / sigma_one
         print(f"    {'порог':<8}{'событий':>8}{'/сутки':>8}"
               f"{'30с ср.':>9}{'t':>6}{'60с ср.':>9}{'t':>6}"
               f"{'60с 1-я':>9}{'60с 2-я':>9}")
-        for th in (1.5, 2.5, 4.0, 6.0, 9.0, 13.0, 20.0):
+        for th in (1.0, 1.5, 2.0, 3.0, 4.5, 6.0, 9.0):
             mask = spans >= th
             if mask.sum() < 8:
                 continue
