@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from recorder.book import OrderBook
-from tools._io import stream
+from tools._io import stream, downtime
 
 
 # --- чтение записи ----------------------------------------------------------
@@ -218,14 +218,19 @@ def replay(symbol, p, decide, seed=0):
     signals = 0
     order_age_us = p["order_life_s"] * 1_000_000
 
+    holes = downtime(p.get("hours"))
+    hole_index = 0
     for r in rows:
         ts = r["ts_local_us"]
-        if next_ts is not None and ts - next_ts > 2_000_000:
-            # дыра в записи: всё сбрасываем, позицию закрывать не по чему
-            book.reset(); eng.order = None; eng.exit_order = None
-            eng.pending.clear()
-            eng.position = 0.0; prev_bid = prev_ask = None
-            next_ts = ts
+        # Рвём только на настоящем простое записи. Тишина по инструменту —
+        # это просто спокойный рынок, позицию в ней держать можно.
+        while hole_index < len(holes) and holes[hole_index][1] <= ts:
+            if next_ts is not None and next_ts >= holes[hole_index][0]:
+                book.reset(); eng.order = None; eng.exit_order = None
+                eng.pending.clear()
+                eng.position = 0.0; prev_bid = prev_ask = None
+                next_ts = holes[hole_index][1]
+            hole_index += 1
         payload = json.loads(r["payload"])
 
         if r["channel"] == "snapshot":

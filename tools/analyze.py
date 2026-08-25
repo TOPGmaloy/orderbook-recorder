@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from recorder.book import OrderBook
-from tools._io import stream
+from tools._io import stream, downtime
 
 HORIZONS_MS = [1000, 5000, 30000, 60000]
 
@@ -42,7 +42,8 @@ def grid(symbol, step_ms, hours=None):
     step_us = step_ms * 1000
     next_ts = None
     segment = 0                 # номер непрерывного куска записи
-    MAX_IDLE_US = 2_000_000     # больше двух секунд тишины — считаем дырой
+    holes = downtime(hours)     # когда диктофон реально стоял
+    hole_index = 0
 
     ts, seg, mid, spread = [], [], [], []
     imb1, imb5, imb10 = [], [], []
@@ -80,15 +81,17 @@ def grid(symbol, step_ms, hours=None):
         return True
 
     for r in stream(symbol=symbol, hours=hours):
-        # Дыра в записи (служба стояла, соединение падало). Без этой проверки
-        # replay штампует через неё тысячи одинаковых кадров с замороженной
-        # книгой, и медиана движения становится нулём — выглядит как «рынок
-        # стоит», а на деле стоит запись.
-        if next_ts is not None and r["ts_local_us"] - next_ts > MAX_IDLE_US:
-            segment += 1
-            next_ts = r["ts_local_us"]
-            book.reset()
-            prev_bid = prev_ask = None
+        # Простой записи: только он рвёт непрерывность. Тишина по инструменту
+        # разрывом не считается — книга в это время просто не менялась, и
+        # кадры с неизменной ценой это честное наблюдение, а не пропуск.
+        while hole_index < len(holes) and next_ts is not None \
+                and holes[hole_index][1] <= r["ts_local_us"]:
+            if next_ts >= holes[hole_index][0]:
+                segment += 1
+                next_ts = holes[hole_index][1]
+                book.reset()
+                prev_bid = prev_ask = None
+            hole_index += 1
         while next_ts is not None and r["ts_local_us"] >= next_ts + step_us:
             emit()
             next_ts += step_us
