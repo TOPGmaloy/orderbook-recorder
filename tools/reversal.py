@@ -33,7 +33,8 @@ import numpy as np
 from tools.analyze import grid
 from tools.setups import block_t
 
-BUCKETS = [(-99, -3), (-3, -2), (-2, -1), (-1, 1), (1, 2), (2, 3), (3, 99)]
+BUCKETS = [(-99, -5), (-5, -3), (-3, -2), (-2, -1), (-1, 1),
+           (1, 2), (2, 3), (3, 5), (5, 8), (8, 99)]
 
 
 def study(symbol, hours, step_ms, lag_ms, horizons):
@@ -93,11 +94,19 @@ def study(symbol, hours, step_ms, lag_ms, horizons):
             cut = stamps.min() + (stamps.max() - stamps.min()) / 2
             h1 = values[stamps < cut]
             h2 = values[stamps >= cut]
+            # средние по получасовым блокам — из них потом собирается
+            # объединённая проверка по всем инструментам
+            keys = stamps // (1800 * 1_000_000)
+            per_block = {}
+            for k, v in zip(keys, values):
+                per_block.setdefault(int(k), []).append(v)
             out["rows"].append({
                 "h": h_s, "lo": lo, "hi": hi, "n": int(mask.sum()),
                 "mean": float(values.mean()), "t": t_val, "blocks": blocks,
                 "h1": float(h1.mean()) if len(h1) > 50 else float("nan"),
-                "h2": float(h2.mean()) if len(h2) > 50 else float("nan")})
+                "h2": float(h2.mean()) if len(h2) > 50 else float("nan"),
+                "block_means": {k: float(np.mean(v)) for k, v in per_block.items()
+                                if len(v) >= 5}})
     return out
 
 
@@ -177,6 +186,34 @@ def main():
                   f"{row['t']:>8.2f}{row['h1']:>10.3f}{row['h2']:>10.3f}")
         print("=" * 96)
         print(f"  Значимо и с совпадающим знаком на половинах: {agree} из {len(results)}")
+
+        # --- объединение инструментов ------------------------------------
+        # Складывать t-статистики нельзя: инструменты ходят вместе, их ошибки
+        # коррелируют, и сумма завысит уверенность. Поэтому сначала усредняем
+        # инструменты ВНУТРИ каждого получасового блока — общее движение рынка
+        # схлопывается в одно наблюдение, — и только потом считаем t по блокам.
+        pooled = {}
+        for res in results:
+            row = next((r for r in res["rows"]
+                        if r["h"] == a.horizon and r["lo"] >= 3), None)
+            if not row:
+                continue
+            for k, v in row["block_means"].items():
+                pooled.setdefault(k, []).append(v)
+        shared = [np.mean(v) for v in pooled.values() if len(v) >= 3]
+        if len(shared) >= 10:
+            arr_p = np.array(shared)
+            t_p = arr_p.mean() / (arr_p.std(ddof=1) / np.sqrt(len(arr_p)))
+            half = len(arr_p) // 2
+            print()
+            print("  ОБЪЕДИНЁННАЯ ПРОВЕРКА (инструменты усреднены внутри")
+            print("  получасовых блоков — так учтено, что они ходят вместе)")
+            print(f"    блоков {len(arr_p)}   среднее {arr_p.mean():+.3f} б.п.   "
+                  f"t = {t_p:.2f}")
+            print(f"    первая половина {arr_p[:half].mean():+.3f}   "
+                  f"вторая {arr_p[half:].mean():+.3f}")
+            print(f"    издержки круга тейкером 1.0 б.п. — "
+                  f"{'перекрывается' if arr_p.mean() > 1.0 else 'НЕ перекрывается'}")
         print("  Знак должен быть ОДИНАКОВЫМ на всех инструментах — иначе это не")
         print("  свойство стакана, а особенности отдельных рынков или шум.")
         print("=" * 96)
