@@ -176,7 +176,7 @@ def main():
     # Один проход по записи: всё, что нужно отчёту, накапливается на лету.
     # Держать строки в памяти нельзя — сутки на шести инструментах это около
     # 11 ГБ объектов Python при 4 ГБ на машине.
-    for r in stream(hours=hours, quiet=True):
+    for r in stream(hours=hours, quiet=True, progress=True):
         total += 1
         ts = r["ts_local_us"]
         if first_ts is None:

@@ -13,8 +13,10 @@
 """
 
 import sys
+import time
 from pathlib import Path
 
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -59,17 +61,31 @@ def closed_files(hours=None, quiet=False):
     return [path for _, path in stamped]
 
 
-def stream(symbol=None, hours=None, channels=None, quiet=False):
-    """Строки записи по возрастанию времени, по файлу за раз."""
-    for path in closed_files(hours, quiet=quiet):
+def stream(symbol=None, hours=None, channels=None, quiet=False, progress=False):
+    """Строки записи по возрастанию времени, по файлу за раз.
+
+    `progress` печатает, сколько файлов пройдено: на суточной записи разбор
+    занимает минуты, и молчащая программа неотличима от зависшей.
+    """
+    paths = closed_files(hours, quiet=quiet)
+    show = progress and len(paths) > 12
+    started = time.monotonic()
+    for number, path in enumerate(paths, 1):
+        if show and (number == 1 or number % 20 == 0 or number == len(paths)):
+            print(f"  ... файл {number} из {len(paths)}, "
+                  f"{time.monotonic() - started:.0f} с", flush=True)
         try:
-            rows = pq.read_table(path).to_pylist()
+            table = pq.read_table(path)
+            if symbol is not None:
+                # отсеиваем инструмент до превращения в объекты Python:
+                # при шести инструментах это сразу вшестеро меньше работы
+                table = table.filter(pc.equal(table["symbol"], symbol))
+            rows = table.to_pylist()
+            del table
         except Exception:
             continue
         rows.sort(key=lambda r: r[TS_COLUMN])
         for row in rows:
-            if symbol is not None and row["symbol"] != symbol:
-                continue
             if channels is not None and row["channel"] not in channels:
                 continue
             yield row
