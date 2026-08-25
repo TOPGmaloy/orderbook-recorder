@@ -31,12 +31,54 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from recorder.book import OrderBook
-from tools._io import stream, downtime
+from tools._io import stream, downtime, closed_files
 
 HORIZONS_MS = [1000, 5000, 30000, 60000]
 
 
-def grid(symbol, step_ms, hours=None):
+CACHE_DIR = Path(__file__).resolve().parents[1] / "cache"
+
+
+def _cache_key(symbol, step_ms, hours):
+    """Отпечаток данных: имена и размеры файлов. Дописался новый файл —
+    отпечаток изменился, кэш пересчитается сам."""
+    import hashlib
+    files = closed_files(hours, quiet=True)
+    mark = "|".join(f"{f.name}:{f.stat().st_size}" for f in files)
+    digest = hashlib.sha1(mark.encode()).hexdigest()[:16]
+    return CACHE_DIR / f"grid_{symbol}_{step_ms}_{digest}.npz"
+
+
+def grid(symbol, step_ms, hours=None, use_cache=True):
+    """Сетка времени с книгой. Результат кэшируется.
+
+    Пересборка книги по всей записи — самая дорогая операция в проекте:
+    распаковка сотен файлов и разбор миллионов сообщений. Для одного прогона
+    это минуты, а прогон по шести инструментам читает те же файлы шесть раз.
+    Сама сетка при этом крошечная — несколько чисел на узел, десятки мегабайт.
+    Поэтому считаем один раз и складываем рядом.
+    """
+    if use_cache:
+        path = _cache_key(symbol, step_ms, hours)
+        if path.exists():
+            try:
+                data = np.load(path)
+                return {k: data[k] for k in data.files}
+            except Exception:
+                path.unlink(missing_ok=True)
+        result = _grid_build(symbol, step_ms, hours)
+        try:
+            CACHE_DIR.mkdir(exist_ok=True)
+            for old in CACHE_DIR.glob(f"grid_{symbol}_{step_ms}_*.npz"):
+                old.unlink()          # устаревшие отпечатки не копим
+            np.savez_compressed(path, **result)
+        except Exception:
+            pass
+        return result
+    return _grid_build(symbol, step_ms, hours)
+
+
+def _grid_build(symbol, step_ms, hours=None):
     """Прогон записи: книга на сетке времени + поток сделок и OFI между узлами."""
     book = OrderBook(symbol)
     step_us = step_ms * 1000

@@ -5,3 +5,4 @@ __pycache__/
 viewer*.html
 dashboard_token.txt
 out/
+cache/

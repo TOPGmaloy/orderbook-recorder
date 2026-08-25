@@ -37,8 +37,8 @@ BUCKETS = [(-99, -5), (-5, -3), (-3, -2), (-2, -1), (-1, 1),
            (1, 2), (2, 3), (3, 5), (5, 8), (8, 99)]
 
 
-def study(symbol, hours, step_ms, lag_ms, horizons):
-    g = grid(symbol, step_ms, hours)
+def study(symbol, hours, step_ms, lag_ms, horizons, use_cache=True):
+    g = grid(symbol, step_ms, hours, use_cache=use_cache)
     ts, mid, seg = g["ts"], g["mid"], g["seg"]
     n = len(mid)
     if n < 5000:
@@ -136,6 +136,8 @@ def main():
     ap.add_argument("--hours", type=float, default=None)
     ap.add_argument("--step-ms", type=int, default=200)
     ap.add_argument("--lag-ms", type=int, default=200)
+    ap.add_argument("--no-cache", action="store_true",
+                    help="пересчитать сетку заново, не брать из кэша")
     ap.add_argument("--horizon", type=int, default=60,
                     help="какой горизонт показывать в сводке")
     a = ap.parse_args()
@@ -157,7 +159,8 @@ def main():
     results = []
     for sym in targets:
         try:
-            res = study(sym, a.hours, a.step_ms, a.lag_ms, horizons)
+            res = study(sym, a.hours, a.step_ms, a.lag_ms, horizons,
+                        use_cache=not a.no_cache)
         except SystemExit:
             res = None
         if not res:
