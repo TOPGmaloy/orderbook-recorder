@@ -248,6 +248,7 @@ def replay_multi(symbol, base, runs, seed=0):
     tick = tick_size(symbol)
     book = OrderBook(symbol)
 
+    spreads = []
     engines = {}
     for name, params, decide in runs:
         eng = Engine(taker_bp=params["taker_bp"], stop_bp=params["stop_bp"],
@@ -329,6 +330,7 @@ def replay_multi(symbol, base, runs, seed=0):
         if not b or not a or b[0] >= a[0]:
             continue
 
+        spreads.append((a[0] - b[0]) / ((a[0] + b[0]) / 2) * 1e4)
         qb, qa = b[1], a[1]
         state = {
             "imb": (qb - qa) / (qb + qa) if qb + qa else 0.0,
@@ -349,7 +351,10 @@ def replay_multi(symbol, base, runs, seed=0):
                 signals[name] += 1
                 eng.submit(ts, 1, a[0], params["size"])
 
-    return {name: (engines[name].trades, signals[name]) for name, _, _ in runs}
+    out = {name: (engines[name].trades, signals[name]) for name, _, _ in runs}
+    out["__spread__"] = (sorted(spreads)[len(spreads) // 2] if spreads else 0.0,
+                         len(spreads))
+    return out
 
 
 def strategy(p):

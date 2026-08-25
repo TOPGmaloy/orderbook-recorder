@@ -70,13 +70,36 @@ def maker_share(trades):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--symbol", default="BTC_USDT")
+    ap.add_argument("--symbol", default="BTC_USDT",
+                    help="инструмент или all — пройти по всем записываемым")
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--lag-ms", type=int, default=200)
     ap.add_argument("--taker-bp", type=float, default=1.0)
     ap.add_argument("--notional", type=float, default=2500)
     a = ap.parse_args()
 
+    from config import SYMBOLS
+    targets = SYMBOLS if a.symbol == "all" else [a.symbol]
+    summary = []
+    for target in targets:
+        run_one(target, a, summary)
+    if len(targets) > 1:
+        print("\n" + "=" * 96)
+        print("  СВОДКА: лучшая конструкция по каждому инструменту")
+        print("=" * 96)
+        print(f"  {'инструмент':<14}{'спред б.п.':>11}{'конструкция':<30}"
+              f"{'1-я пол.':>10}{'2-я пол.':>10}{'лимитных':>10}")
+        for row in summary:
+            print(f"  {row['symbol']:<14}{row['spread']:>11.3f}{row['name']:<30}"
+                  f"{row['first']:>10.3f}{row['second']:>10.3f}{row['maker']:>9.0f}%")
+        print("=" * 96)
+        print("  Пассивная стратегия зарабатывает спред и платит за невыгодные")
+        print("  исполнения. Чем шире спред в б.п., тем больше можно заработать —")
+        print("  на BTC спред 0.013 б.п. и зарабатывать там нечего в принципе.")
+        print("=" * 96)
+
+
+def run_one(symbol, a, summary):
     base = {"hours": a.hours, "lag_ms": a.lag_ms, "step_ms": 200,
             "taker_bp": a.taker_bp, "size": 1.0, "order_life_s": 10,
             "stop_bp": 2, "target_bp": 2, "time_stop_s": 60,
@@ -90,12 +113,15 @@ def main():
     control = dict(base, stop_bp=999, target_bp=3, time_stop_s=60)
     runs.append(("СЛУЧАЙНЫЙ ВХОД", control, random_control(0.01)))
 
-    print("=" * 96)
-    print(f"  {a.symbol}   последние {a.hours:g} ч   задержка {a.lag_ms} мс   "
+    print("\n" + "=" * 96)
+    print(f"  {symbol}   последние {a.hours:g} ч   задержка {a.lag_ms} мс   "
           f"выход по рынку {a.taker_bp} б.п.   номинал ${a.notional:,.0f}")
     print("=" * 96)
 
-    result = replay_multi(a.symbol, base, runs)
+    result = replay_multi(symbol, base, runs)
+    spread_med, _ = result.pop("__spread__")
+    print(f"  медианный спред {spread_med:.3f} б.п. — столько зарабатывает "
+          f"круг «купил по биду, продал по аску»")
 
     all_trades = [t for trades, _ in result.values() for t in trades]
     if not all_trades:
@@ -110,6 +136,7 @@ def main():
     print(f"  {'':<28}{'':>7}{'выходов':>10}"
           f"{'ср.б.п.':>11}{'t':>11}{'ср.б.п.':>11}{'t':>11}")
     print("  " + "-" * 92)
+    best = None
     for name, _, _ in runs:
         trades, _ = result[name]
         first, second = split_stats(trades, cutoff)
@@ -118,6 +145,15 @@ def main():
             row += (f"{half['mean']:>11.3f}{half['t']:>11.2f}"
                     if half else f"{'—':>11}{'—':>11}")
         print(row)
+        if first and second and name != "СЛУЧАЙНЫЙ ВХОД":
+            worst = min(first["mean"], second["mean"])
+            if best is None or worst > best[0]:
+                best = (worst, {"symbol": symbol, "spread": spread_med,
+                                "name": name, "first": first["mean"],
+                                "second": second["mean"],
+                                "maker": maker_share(trades)})
+    if best:
+        summary.append(best[1])
 
     print("=" * 96)
     print("  Читать так: конструкция чего-то стоит, только если ср.б.п. положительно")
@@ -125,6 +161,7 @@ def main():
     print("  другой — это шум. Доля лимитных выходов ниже 70% означает, что комиссия")
     print("  съест преимущество независимо от остальных цифр.")
     print("=" * 96)
+    return
 
 
 if __name__ == "__main__":
