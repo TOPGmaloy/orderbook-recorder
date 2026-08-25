@@ -70,6 +70,7 @@ class OrderBook:
     ready: bool = False
 
     # счётчики для статистики
+    _best: tuple = None      # кэш лучших цен, сбрасывается при изменении книги
     applied: int = 0
     gaps: int = 0
     stale: int = 0
@@ -158,6 +159,7 @@ class OrderBook:
         return OK
 
     def _merge(self, data):
+        self._best = None
         for price, volume in _levels(data, "bids"):
             if volume == 0:
                 self.bids.pop(price, None)
@@ -172,13 +174,22 @@ class OrderBook:
     # --- то, что пригодится анализатору ------------------------------------
 
     def best(self):
-        """Лучшие бид и аск: (цена, объём) или None, если сторона пуста."""
+        """Лучшие бид и аск: (цена, объём) или None, если сторона пуста.
+
+        Результат кэшируется до следующего изменения книги. Без кэша это
+        max() и min() по полутора тысячам уровней на каждый вызов, а
+        спрашивают лучшие цены много раз за одну строку — при бэктесте
+        семнадцать движков подряд. Так один пересчёт вместо семнадцати.
+        """
+        if self._best is not None:
+            return self._best
         bid = max(self.bids) if self.bids else None
         ask = min(self.asks) if self.asks else None
-        return (
+        self._best = (
             (bid, self.bids[bid]) if bid is not None else None,
             (ask, self.asks[ask]) if ask is not None else None,
         )
+        return self._best
 
     def sane(self):
         """Бид не должен быть выше аска. Если стал — книга битая."""

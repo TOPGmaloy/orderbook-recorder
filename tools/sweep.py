@@ -78,8 +78,25 @@ def main():
     ap.add_argument("--lag-ms", type=int, default=200)
     ap.add_argument("--taker-bp", type=float, default=1.0)
     ap.add_argument("--notional", type=float, default=2500)
+    ap.add_argument("--profile", action="store_true",
+                    help="показать, где уходит время (берите с --hours 2)")
     a = ap.parse_args()
 
+    if a.profile:
+        import cProfile, pstats, io as _io
+        a.profile = False
+        pr = cProfile.Profile(); pr.enable()
+        main_body(a)
+        pr.disable()
+        st = pstats.Stats(pr); st.sort_stats("tottime")
+        buf = _io.StringIO(); st.stream = buf; st.print_stats(14)
+        print("\n  ГДЕ УХОДИТ ВРЕМЯ")
+        print("\n".join(buf.getvalue().splitlines()[4:22]))
+        return
+    main_body(a)
+
+
+def main_body(a):
     from config import SYMBOLS
     targets = SYMBOLS if a.symbol == "all" else [a.symbol]
     summary = []
