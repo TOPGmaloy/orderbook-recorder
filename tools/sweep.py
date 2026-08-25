@@ -63,6 +63,28 @@ def split_stats(trades, cutoff_us):
     return out
 
 
+def anatomy(trades):
+    """Откуда берётся результат: как выходили, сколько держали, как часто в плюс.
+
+    Нужно затем, что средний результат в базисных пунктах ничего не говорит о
+    механике. Если стратегия якобы забирает почти весь ход цены, ответ виден
+    здесь: либо цель срабатывает подозрительно часто, либо сделки держатся
+    секунды, либо выходов по стопу почти нет.
+    """
+    if not trades:
+        return ""
+    import numpy as np
+    hold = np.array([(t.exit_us - t.entry_us) / 1e6 for t in trades])
+    wins = sum(1 for t in trades if t.pnl_bp > 0) / len(trades) * 100
+    by = {}
+    for t in trades:
+        by[t.exit_reason] = by.get(t.exit_reason, 0) + 1
+    mix = " ".join(f"{k.split()[0]} {v*100//len(trades)}%" for k, v in
+                   sorted(by.items(), key=lambda kv: -kv[1]))
+    return (f"держали медиана {np.median(hold):.0f} с, в плюс {wins:.0f}%, "
+            f"выходы: {mix}")
+
+
 def maker_share(trades):
     if not trades:
         return 0.0
@@ -223,6 +245,8 @@ def report_one(symbol, a, result, runs, summary):
                                 "maker": maker_share(trades)})
     if best:
         summary.append(best[1])
+        name = best[1]["name"]
+        print(f"\n    разбор лучшей ({name}): {anatomy(result[name][0])}")
 
     print("=" * 96)
     print("  Читать так: конструкция чего-то стоит, только если ср.б.п. положительно")

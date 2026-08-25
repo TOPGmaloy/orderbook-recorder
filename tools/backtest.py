@@ -298,6 +298,8 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
     # каждый из восьми генераторов сканирует все файлы ещё до начала работы.
     holes = downtime(p.get("hours")) if holes is None else holes
     hole_index = 0
+    last_row_ts = None
+    BLIND_US = 60_000_000   # минута без строк — управлять позицией уже нечем
     # Строки подаются снаружи через send(): так один проход по файлам кормит
     # сразу все инструменты, вместо того чтобы каждый читал запись заново.
     while True:
@@ -307,13 +309,35 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
         ts = r["ts_local_us"]
         # Рвём только на настоящем простое записи. Тишина по инструменту —
         # это просто спокойный рынок, позицию в ней держать можно.
+        # Страховка поверх детектора простоев: если строк по инструменту не
+        # было дольше минуты, движок всё это время не мог ни сработать стопом,
+        # ни закрыться по таймеру, а позиция при этом «жила». В локальной
+        # записи нашлась сделка длиной 2737 секунд при таймере в 900 — она
+        # молча забрала движение, которого мы не наблюдали. Детектор простоев
+        # такие дыры видит не всегда, поэтому проверяем ещё и напрямую.
+        if last_row_ts is not None and ts - last_row_ts > BLIND_US:
+            book.reset(); prev_bid = prev_ask = None
+            for eng in engines.values():
+                eng.order = None; eng.exit_order = None
+                eng.pending.clear()
+                eng.position = 0.0; eng.entry_cost_bp = 0.0
+            next_ts = ts
+        last_row_ts = ts
+
         while hole_index < len(holes) and holes[hole_index][1] <= ts:
-            if next_ts is not None and next_ts >= holes[hole_index][0]:
-                book.reset(); prev_bid = prev_ask = None
-                for eng in engines.values():
-                    eng.order = None; eng.exit_order = None
-                    eng.pending.clear(); eng.position = 0.0
-                next_ts = holes[hole_index][1]
+            # Через разрыв записи позицию держать нельзя: цен в этом окне мы не
+            # видели, а книга после разрыва пуста, и движок не может ни
+            # сработать стопом, ни закрыться по таймеру. Условие тут раньше
+            # стояло лишнее, и позиции переживали дыру: одна сделка держалась
+            # 2737 секунд при таймере в 900 и забирала движение, которого мы
+            # не наблюдали. Сбрасываем безусловно и молча — такие сделки в
+            # статистику попадать не должны вовсе.
+            book.reset(); prev_bid = prev_ask = None
+            for eng in engines.values():
+                eng.order = None; eng.exit_order = None
+                eng.pending.clear()
+                eng.position = 0.0; eng.entry_cost_bp = 0.0
+            next_ts = holes[hole_index][1]
             hole_index += 1
         payload = json.loads(r["payload"])
 
