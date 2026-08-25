@@ -33,7 +33,12 @@ import numpy as np
 from recorder.book import OrderBook
 from tools._io import stream, downtime, closed_files
 
-HORIZONS_MS = [1000, 5000, 30000, 60000]
+# Горизонты до получаса намеренно. Всё, что мы мерили раньше, кончалось на
+# минуте — а при цели в 2-5 б.п. плата за исполнение в 1-2 б.п. съедает от
+# трети до всей прибыли, и это безнадёжно по арифметике, а не по сигналу.
+# При цели в 30-100 б.п. та же плата составляет проценты. Между минутой и
+# двенадцатью часами моментум-бота никто ничего не мерил.
+HORIZONS_MS = [1000, 5000, 30000, 60000, 300000, 900000, 1800000]
 
 
 CACHE_DIR = Path(__file__).resolve().parents[1] / "cache"
@@ -292,7 +297,8 @@ def main():
         cost_mt = a.taker_bp + sp / 2
         px = float(np.median(mid))
         share = float(np.mean(absmove > cost_mt)) * 100
-        print(f"\nГОРИЗОНТ {h_ms/1000:g} с — движение по модулю: медиана "
+        label = (f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с")
+        print(f"\nГОРИЗОНТ {label} — движение по модулю: медиана "
               f"{med:.3f} б.п. (${med*px/1e4:.2f}), "
               f"в 10% случаев больше {p90:.3f} б.п. (${p90*px/1e4:.2f})")
         print(f"  окон, где движение перекрывает издержки maker/taker "
