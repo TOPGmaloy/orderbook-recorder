@@ -83,6 +83,166 @@ def grid(symbol, step_ms, hours=None, use_cache=True):
     return _grid_build(symbol, step_ms, hours)
 
 
+def build_grids(symbols, step_ms, hours=None, use_cache=True):
+    """Сетки сразу для нескольких инструментов за ОДИН проход по записи.
+
+    Раньше каждый инструмент читал все файлы заново: восемь инструментов —
+    восемь распаковок девятисот мегабайт. Здесь поток читается один раз, а
+    книги ведутся параллельно. Уже посчитанное берётся из кэша и в проход не
+    попадает.
+    """
+    need, out = [], {}
+    for sym in symbols:
+        if use_cache:
+            path = _cache_key(sym, step_ms, hours)
+            if path.exists():
+                try:
+                    data = np.load(path)
+                    out[sym] = {k: data[k] for k in data.files}
+                    continue
+                except Exception:
+                    path.unlink(missing_ok=True)
+        need.append(sym)
+    if not need:
+        return out
+
+    print(f"  собираю сетки: {', '.join(need)}", flush=True)
+    built = _grid_build_many(need, step_ms, hours)
+    for sym, result in built.items():
+        out[sym] = result
+        if use_cache:
+            try:
+                CACHE_DIR.mkdir(exist_ok=True)
+                for old in CACHE_DIR.glob(f"grid_{sym}_{step_ms}_*.npz"):
+                    old.unlink()
+                np.savez_compressed(_cache_key(sym, step_ms, hours), **result)
+            except Exception:
+                pass
+    return out
+
+
+class _GridState:
+    """Состояние сборки для одного инструмента: книга, узлы сетки, накопители.
+
+    Вынесено в объект ровно затем, чтобы вести восемь книг одновременно в
+    одном проходе по файлам. Логика внутри та же, что и при одиночной сборке.
+    """
+
+    def __init__(self, symbol, step_ms):
+        import heapq
+        self.heapq = heapq
+        self.symbol = symbol
+        self.book = OrderBook(symbol)
+        self.step_us = step_ms * 1000
+        self.next_ts = None
+        self.segment = 0
+        self.cols = {k: [] for k in ("ts", "seg", "mid", "spread", "imb1",
+                                     "imb5", "imb10", "micro", "ofi_raw",
+                                     "delta_raw")}
+        self.ofi = self.buy = self.sell = 0.0
+        self.prev_bid = self.prev_ask = None
+
+    def _tops(self, side, n, high_first):
+        picker = self.heapq.nlargest if high_first else self.heapq.nsmallest
+        return sum(side[p] for p in picker(n, side))
+
+    def _emit(self):
+        b, a = self.book.best()
+        if not b or not a or b[0] >= a[0]:
+            return
+        m = (b[0] + a[0]) / 2
+        c = self.cols
+        c["ts"].append(self.next_ts); c["seg"].append(self.segment)
+        c["mid"].append(m); c["spread"].append((a[0] - b[0]) / m * 1e4)
+        qb, qa = b[1], a[1]
+        c["imb1"].append((qb - qa) / (qb + qa) if qb + qa else 0.0)
+        for n, key in ((5, "imb5"), (10, "imb10")):
+            sb = self._tops(self.book.bids, n, True)
+            sa = self._tops(self.book.asks, n, False)
+            c[key].append((sb - sa) / (sb + sa) if sb + sa else 0.0)
+        c["micro"].append(((b[0] * qa + a[0] * qb) / (qa + qb) - m) / m * 1e4)
+        c["ofi_raw"].append(self.ofi)
+        c["delta_raw"].append(self.buy - self.sell)
+        self.ofi = self.buy = self.sell = 0.0
+
+    def on_hole(self, resume_ts):
+        if self.next_ts is not None and self.next_ts >= resume_ts - 1:
+            return
+        if self.next_ts is not None:
+            self.segment += 1
+            self.next_ts = resume_ts
+            self.book.reset()
+            self.prev_bid = self.prev_ask = None
+
+    def on_row(self, r):
+        ts = r["ts_local_us"]
+        while self.next_ts is not None and ts >= self.next_ts + self.step_us:
+            self._emit()
+            self.next_ts += self.step_us
+        payload = json.loads(r["payload"])
+        channel = r["channel"]
+        if channel == "snapshot":
+            self.book.apply_snapshot(payload)
+            if self.next_ts is None and self.book.ready:
+                self.next_ts = ts
+                self.prev_bid = self.prev_ask = None
+        elif channel == "depth":
+            if self.book.apply_delta(payload) == "ok":
+                b, a = self.book.best()
+                if b and a:
+                    if self.prev_bid is not None:
+                        pb, pa = self.prev_bid, self.prev_ask
+                        self.ofi += (b[1] if b[0] > pb[0]
+                                     else b[1] - pb[1] if b[0] == pb[0] else -pb[1])
+                        self.ofi -= (a[1] if a[0] < pa[0]
+                                     else a[1] - pa[1] if a[0] == pa[0] else -pa[1])
+                    self.prev_bid, self.prev_ask = b, a
+        elif channel == "deal":
+            for deal in (payload if isinstance(payload, list) else [payload]):
+                try:
+                    v = float(deal["v"])
+                    if int(deal["T"]) == 1:
+                        self.buy += v
+                    else:
+                        self.sell += v
+                except (KeyError, TypeError, ValueError):
+                    continue
+        elif channel == "gap":
+            self.book.ready = False
+            self.prev_bid = self.prev_ask = None
+
+    def finish(self):
+        c = self.cols
+        return {
+            "ts": np.array(c["ts"], dtype=np.int64),
+            "seg": np.array(c["seg"], dtype=np.int32),
+            "mid": np.array(c["mid"]),
+            "spread": np.array(c["spread"]),
+            "imb1": np.array(c["imb1"]), "imb5": np.array(c["imb5"]),
+            "imb10": np.array(c["imb10"]), "micro": np.array(c["micro"]),
+            "ofi_raw": np.array(c["ofi_raw"]),
+            "delta_raw": np.array(c["delta_raw"]),
+        }
+
+
+def _grid_build_many(symbols, step_ms, hours=None):
+    """Один поток, несколько книг. Логика на инструмент та же, что и в
+    одиночной сборке, — просто состояние держится в словаре."""
+    states = {sym: _GridState(sym, step_ms) for sym in symbols}
+    holes = downtime(hours)
+    hole_i = 0
+    for r in stream(hours=hours, progress=True):
+        ts = r["ts_local_us"]
+        while hole_i < len(holes) and holes[hole_i][1] <= ts:
+            for st in states.values():
+                st.on_hole(holes[hole_i][1])
+            hole_i += 1
+        st = states.get(r["symbol"])
+        if st is not None:
+            st.on_row(r)
+    return {sym: st.finish() for sym, st in states.items()}
+
+
 def _grid_build(symbol, step_ms, hours=None):
     """Прогон записи: книга на сетке времени + поток сделок и OFI между узлами."""
     book = OrderBook(symbol)
@@ -229,6 +389,7 @@ def cross_check(symbols, step_ms, lag_ms, hours, horizons_ms, features):
     print("  Находка засчитывается, только если знак совпадает у большинства")
     print("  и держится на обеих половинах записи.")
     print("=" * 96)
+    grids = build_grids(symbols, step_ms, hours)
     for h_ms in horizons_ms:
         label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
         for feat in features:
@@ -237,9 +398,8 @@ def cross_check(symbols, step_ms, lag_ms, hours, horizons_ms, features):
                   f"{'1-я пол.':>10}{'2-я пол.':>10}{'движение':>11}")
             agree = 0
             for sym in symbols:
-                try:
-                    g = grid(sym, step_ms, hours)
-                except SystemExit:
+                g = grids.get(sym)
+                if g is None:
                     continue
                 n = len(g["mid"])
                 if n < 5000:
