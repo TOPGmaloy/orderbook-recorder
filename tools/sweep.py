@@ -211,6 +211,8 @@ def report_one(symbol, a, result, runs, summary):
     print("=" * 96)
 
     spread_med, _ = result.pop("__spread__")
+    path_bp = result.pop("__path__", 0.0)
+    impossible = result.pop("__impossible__", {})
     print(f"  медианный спред {spread_med:.3f} б.п. — столько зарабатывает "
           f"круг «купил по биду, продал по аску»")
 
@@ -247,6 +249,16 @@ def report_one(symbol, a, result, runs, summary):
         summary.append(best[1])
         name = best[1]["name"]
         print(f"\n    разбор лучшей ({name}): {anatomy(result[name][0])}")
+        trades = result[name][0]
+        taken = sum(abs(tr.pnl_bp) for tr in trades)
+        share = taken / path_bp * 100 if path_bp else 0
+        flag = "  <-- НЕВОЗМОЖНО, ищи ошибку" if share > 30 else ""
+        print(f"    забрано {taken:,.0f} б.п. при полном ходе цены "
+              f"{path_bp:,.0f} — это {share:.1f}%{flag}")
+        bad = impossible.get(name, 0)
+        if bad:
+            print(f"    ИСПОЛНЕНИЙ ПО НЕДОСТИЖИМОЙ ЦЕНЕ: {bad} из {len(trades)} "
+                  f"({bad/max(len(trades),1)*100:.0f}%)")
 
     print("=" * 96)
     print("  Читать так: конструкция чего-то стоит, только если ср.б.п. положительно")

@@ -122,6 +122,7 @@ class Engine:
     entry_us: int = 0
     side: int = 0
     trades: list = field(default_factory=list)
+    impossible: int = 0     # исполнений выхода по цене, недостижимой в книге
 
     def submit(self, now_us, side, price, size):
         """Заявка уходит на биржу и появится там только через lag."""
@@ -173,6 +174,15 @@ class Engine:
                         self._open(now_us, o.side, o.price, o.size)
                         self.order = None
                     else:
+                        # Проверка на невозможное исполнение: продать по цене
+                        # выше текущего аска (или купить ниже бида) нельзя.
+                        # Если такое случилось, значит заявку налили там, где
+                        # рынка не было, и вся прибыль конструкции — выдумка.
+                        bb, aa = self.book.best()
+                        if bb and aa:
+                            if (o.side == 1 and o.price > aa[0] + self.tick) or \
+                               (o.side == 0 and o.price < bb[0] - self.tick):
+                                self.impossible += 1
                         self._close(now_us, o.price, "цель лимиткой", cost=0.0)
                     return
 
@@ -268,6 +278,8 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
     book = OrderBook(symbol)
 
     spreads = []
+    path_bp = 0.0        # полный ход цены: сумма модулей изменений середины
+    prev_mid = None
     # история середины для сигнала разворота: движение за прошлую секунду
     mid_hist = deque(maxlen=200)
     warmup = []          # первые замеры идут только на оценку сигмы
@@ -397,6 +409,9 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
             deal_hist.popleft()
         delta_raw = sum(v for _, v in deal_hist)
         now_mid = (a[0] + b[0]) / 2
+        if prev_mid:
+            path_bp += abs(now_mid / prev_mid - 1) * 1e4
+        prev_mid = now_mid
         mid_hist.append((ts, now_mid))
         # движение за прошлую секунду
         past = next((m for t0, m in mid_hist if ts - t0 <= 1_000_000), None)
@@ -448,6 +463,10 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
     out = {name: (engines[name].trades, signals[name]) for name, _, _ in runs}
     out["__spread__"] = (sorted(spreads)[len(spreads) // 2] if spreads else 0.0,
                          len(spreads))
+    # Физический предел: забрать больше, чем прошла цена, невозможно ничем.
+    # Любая ошибка в учёте исполнений вылезает здесь сразу и наглядно.
+    out["__path__"] = path_bp
+    out["__impossible__"] = {name: engines[name].impossible for name, _, _ in runs}
     return out
 
 
