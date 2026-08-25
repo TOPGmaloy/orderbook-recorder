@@ -254,6 +254,9 @@ def replay_multi(symbol, base, runs, seed=0):
     mid_hist = deque(maxlen=200)
     warmup = []          # первые замеры идут только на оценку сигмы
     sigma = None
+    deal_hist = deque(maxlen=4000)   # (ts, объём со знаком) для дельты сделок
+    delta_warm = []
+    delta_sigma = None
     engines = {}
     for name, params, decide in runs:
         eng = Engine(taker_bp=params["taker_bp"], stop_bp=params["stop_bp"],
@@ -310,8 +313,10 @@ def replay_multi(symbol, base, runs, seed=0):
             deals = []
             for deal in (payload if isinstance(payload, list) else [payload]):
                 try:
-                    deals.append((float(deal["p"]), float(deal["v"]),
-                                  0 if int(deal["T"]) == 1 else 1))
+                    vol = float(deal["v"])
+                    side = 0 if int(deal["T"]) == 1 else 1
+                    deals.append((float(deal["p"]), vol, side))
+                    deal_hist.append((ts, vol if side == 0 else -vol))
                 except (KeyError, TypeError, ValueError):
                     continue
             for eng in engines.values():
@@ -336,6 +341,11 @@ def replay_multi(symbol, base, runs, seed=0):
             continue
 
         spreads.append((a[0] - b[0]) / ((a[0] + b[0]) / 2) * 1e4)
+        # дельта сделок за последние 5 секунд: перевес агрессивных покупок
+        cut5 = ts - 5_000_000
+        while deal_hist and deal_hist[0][0] < cut5:
+            deal_hist.popleft()
+        delta_raw = sum(v for _, v in deal_hist)
         now_mid = (a[0] + b[0]) / 2
         mid_hist.append((ts, now_mid))
         # движение за прошлую секунду
@@ -343,6 +353,12 @@ def replay_multi(symbol, base, runs, seed=0):
         move_bp = (now_mid / past - 1) * 1e4 if past else 0.0
         # Сигма оценивается по первым замерам и замораживается: считать её по
         # всей записи значило бы подглядывать в будущее.
+        if delta_sigma is None:
+            delta_warm.append(delta_raw)
+            if len(delta_warm) >= 1000:
+                est = float(np.std(delta_warm))
+                if est > 0:
+                    delta_sigma = est
         if sigma is None:
             warmup.append(move_bp)
             # Порог разогрева небольшой намеренно: на коротких записях
@@ -356,6 +372,7 @@ def replay_multi(symbol, base, runs, seed=0):
         qb, qa = b[1], a[1]
         state = {
             "move_sig": move_bp / sigma,
+            "delta_sig": (delta_raw / delta_sigma) if delta_sigma else 0.0,
             "imb": (qb - qa) / (qb + qa) if qb + qa else 0.0,
             "ofi": sum(v for _, v in ofi_hist),
             "bid": b[0], "ask": a[0],
@@ -408,6 +425,27 @@ def reversal_strategy(p):
         if move <= -p["move_th"]:
             return "buy"
         if move >= p["move_th"]:
+            return "sell"
+        return None
+    return decide
+
+
+def delta_strategy(p):
+    """Идти ЗА потоком агрессивных сделок на горизонте минут.
+
+    Наклон признака положительный: куда льют по рынку, туда цена и идёт
+    следующие пять-пятнадцать минут. Это продолжение, а не разворот, и это
+    прямо противоположно тому, что работает на секундных горизонтах, где
+    цену двигает давление в очереди, а не исполненный объём.
+
+    Вход лимиткой на своей стороне: при удержании в минуты спешить некуда,
+    и лишний базисный пункт на входе съедает заметную долю цели.
+    """
+    def decide(s, rng):
+        d = s.get("delta_sig", 0.0)
+        if d >= p["delta_th"]:
+            return "buy"
+        if d <= -p["delta_th"]:
             return "sell"
         return None
     return decide

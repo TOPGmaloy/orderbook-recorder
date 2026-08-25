@@ -29,8 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from tools.backtest import (replay_multi, strategy,
-                            reversal_strategy, random_control)
+from tools.backtest import (replay_multi, strategy, reversal_strategy,
+                            delta_strategy, random_control)
 
 # Конструкции выбраны из измеренной динамики, а не перебором:
 # медиана движения за 60 с — 2.155 б.п., поэтому стоп в 2 б.п. стоит внутри
@@ -104,7 +104,7 @@ def run_one(symbol, a, summary):
     base = {"hours": a.hours, "lag_ms": a.lag_ms, "step_ms": 200,
             "taker_bp": a.taker_bp, "size": 1.0, "order_life_s": 10,
             "stop_bp": 2, "target_bp": 2, "time_stop_s": 60,
-            "imb_th": 0.4, "ofi_th": 0.0, "move_th": 3.0}
+            "imb_th": 0.4, "ofi_th": 0.0, "move_th": 3.0, "delta_th": 2.0}
 
     runs = []
     for name, stop, target, timer, th in GRID:
@@ -118,6 +118,15 @@ def run_one(symbol, a, summary):
                       time_stop_s=timer, move_th=move_th)
         runs.append((f"разворот {move_th:g}сигм/цель {target}/{timer}с",
                      params, reversal_strategy(params)))
+    # конструкции на потоке сделок: горизонт минут, цели в разы больше.
+    # Раньше все цели были 2-6 б.п. при удержании минуту — там издержки
+    # съедали всё независимо от сигнала.
+    for delta_th, target, stop, timer in ((2.0, 8, 16, 300), (3.0, 8, 16, 300),
+                                          (3.0, 15, 25, 900), (2.0, 15, 25, 900)):
+        params = dict(base, stop_bp=stop, target_bp=target,
+                      time_stop_s=timer, delta_th=delta_th)
+        runs.append((f"поток {delta_th:g}сигм/цель {target}/{timer//60}мин",
+                     params, delta_strategy(params)))
     control = dict(base, stop_bp=999, target_bp=3, time_stop_s=60)
     runs.append(("СЛУЧАЙНЫЙ ВХОД", control, random_control(0.01)))
 
