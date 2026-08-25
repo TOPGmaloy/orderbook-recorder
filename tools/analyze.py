@@ -221,6 +221,72 @@ def newey_west_t(x, y, lags):
     return beta, (beta / np.sqrt(var) if var > 0 else np.nan), n
 
 
+def cross_check(symbols, step_ms, lag_ms, hours, horizons_ms, features):
+    """Один признак на всех инструментах: единственная проверка, которая до
+    сих пор убивала все находки. Печатается наклон, t и обе половины записи."""
+    print("=" * 96)
+    print("  ПРОВЕРКА НА ВСЕХ ИНСТРУМЕНТАХ")
+    print("  Находка засчитывается, только если знак совпадает у большинства")
+    print("  и держится на обеих половинах записи.")
+    print("=" * 96)
+    for h_ms in horizons_ms:
+        label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
+        for feat in features:
+            print(f"\n  ГОРИЗОНТ {label}   признак: {feat}")
+            print(f"    {'инструмент':<13}{'наклон':>9}{'t':>7}{'контроль':>10}"
+                  f"{'1-я пол.':>10}{'2-я пол.':>10}{'движение':>11}")
+            agree = 0
+            for sym in symbols:
+                try:
+                    g = grid(sym, step_ms, hours)
+                except SystemExit:
+                    continue
+                n = len(g["mid"])
+                if n < 5000:
+                    print(f"    {sym:<13} данных мало")
+                    continue
+                lag = max(1, lag_ms // step_ms)
+                h = max(1, h_ms // step_ms)
+                end = n - lag - h
+                if end <= 1000:
+                    continue
+                x = _feature(g, feat, step_ms)
+                same = g["seg"][lag + h: lag + h + end] == g["seg"][lag: lag + end]
+                fut = np.full(n, np.nan)
+                fut[:end] = np.where(
+                    same,
+                    (g["mid"][lag + h: lag + h + end] / g["mid"][lag: lag + end] - 1) * 1e4,
+                    np.nan)
+                beta, t, _ = newey_west_t(x, fut, lags=h + lag)
+                rng = np.random.default_rng(0)
+                xs = x.copy(); good = np.isfinite(xs)
+                xs[good] = rng.permutation(xs[good])
+                _, t_ctrl, _ = newey_west_t(xs, fut, lags=h + lag)
+                half = n // 2
+                b1, _, _ = newey_west_t(x[:half], fut[:half], lags=h + lag)
+                b2, _, _ = newey_west_t(x[half:], fut[half:], lags=h + lag)
+                move = np.nanmedian(np.abs(fut))
+                if abs(t) > 3 and np.sign(b1) == np.sign(b2):
+                    agree += 1
+                print(f"    {sym:<13}{beta:>9.3f}{t:>7.2f}{t_ctrl:>10.2f}"
+                      f"{b1:>10.3f}{b2:>10.3f}{move:>11.2f}")
+            print(f"    значимо и знак держится на половинах: {agree} из {len(symbols)}")
+    print("=" * 96)
+
+
+def _feature(g, name, step_ms):
+    if name.startswith("дельта"):
+        window = 5000 if "5" in name else 1000
+        v = rolling(g["delta_raw"], max(1, window // step_ms))
+    elif name.startswith("OFI"):
+        window = 5000 if "5" in name else 1000
+        v = rolling(g["ofi_raw"], max(1, window // step_ms))
+    else:
+        return g.get(name, g["imb1"])
+    sd = np.nanstd(v)
+    return v / sd if sd > 0 else v
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -234,6 +300,13 @@ def main():
     ap.add_argument("--taker-bp", type=float, default=1.0,
                     help="комиссия taker за одну сторону, б.п. (MEXC 1.0-2.0)")
     a = ap.parse_args()
+
+    if a.symbol == "all":
+        from config import SYMBOLS
+        cross_check(SYMBOLS, a.step_ms, a.lag_ms, a.hours,
+                    [300000, 900000],
+                    ["дельта сделок 1с", "дельта сделок 5с"])
+        return
 
     g = grid(a.symbol, a.step_ms, a.hours)
     n = len(g["mid"])
