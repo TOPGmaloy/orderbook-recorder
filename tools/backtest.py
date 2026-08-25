@@ -30,6 +30,7 @@
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,25 @@ from tools._io import stream, downtime
 
 
 # --- чтение записи ----------------------------------------------------------
+
+def tick_size(symbol):
+    """Шаг цены инструмента. Без него выходная лимитка встаёт на цену, которой
+    не существует: на BTC шаг 0.1, а «вход × 1.0002» даёт 77344.466. Очередь
+    на несуществующем уровне пуста, и модель исполняет такую заявку слишком
+    легко — то есть врёт в свою пользу."""
+    fallback = {"BTC_USDT": 0.1, "ETH_USDT": 0.01, "SOL_USDT": 0.01,
+                "XAU_USDT": 0.01, "XRP_USDT": 0.0001, "HYPE_USDT": 0.001}
+    try:
+        import requests
+        body = requests.get("https://contract.mexc.com/api/v1/contract/detail",
+                            timeout=15).json()
+        for row in body.get("data") or []:
+            if row.get("symbol") == symbol:
+                return float(row["priceUnit"])
+    except Exception:
+        pass
+    return fallback.get(symbol, 0.01)
+
 
 def events(symbol, hours=None):
     """Поток событий по инструменту. Генератор, а не список: суточная запись
@@ -89,6 +109,7 @@ class Engine:
     lag_us: int
 
     maker_exit: bool = True
+    tick: float = 0.01
     book: OrderBook = None
     order: RestingOrder = None
     exit_order: RestingOrder = None
@@ -160,9 +181,14 @@ class Engine:
         if self.maker_exit:
             # Выход тоже лимиткой: тейкерный выход съедает половину цели и
             # требует винрейта под 75% просто чтобы не терять.
-            target = price * (1 + self.target_bp / 1e4) if side == 0 \
+            raw = price * (1 + self.target_bp / 1e4) if side == 0 \
                 else price * (1 - self.target_bp / 1e4)
-            target = round(target, 8)
+            # округляем В СТОРОНУ ОТ входа: цель становится чуть дальше, а не
+            # чуть ближе. Ошибаться надо против себя, иначе бэктест рисует
+            # исполнения, которых не было бы
+            steps = raw / self.tick
+            target = (math.ceil(steps) if side == 0 else math.floor(steps)) * self.tick
+            target = round(target, 10)
             opposite = 1 - side
             level = self.book.asks if opposite == 1 else self.book.bids
             self.exit_order = RestingOrder(opposite, target, size,
@@ -201,21 +227,43 @@ class Engine:
 # --- прогон -----------------------------------------------------------------
 
 def replay(symbol, p, decide, seed=0):
-    """Один прогон записи. `decide(state, rng)` возвращает 'buy' / 'sell' / None."""
+    """Один прогон. Обёртка вокруг replay_multi для единственной конструкции."""
+    out = replay_multi(symbol, p, [("одна", p, decide)], seed=seed)
+    return out["одна"]
+
+
+def replay_multi(symbol, base, runs, seed=0):
+    """Много конструкций за ОДИН проход по записи.
+
+    Чтение и сборка книги — самая дорогая часть, и она общая для всех
+    конструкций. Гонять запись по разу на каждую означало бы минуты вместо
+    секунд и соблазн урезать сетку параметров ради скорости.
+
+    `runs` — список (имя, параметры, решающая функция). У каждой конструкции
+    свой движок и своя позиция, они друг о друге не знают.
+    """
+    p = base
     rows = events(symbol, p.get("hours"))
     rng = np.random.default_rng(seed)
-    eng = Engine(taker_bp=p["taker_bp"], stop_bp=p["stop_bp"],
-                 target_bp=p["target_bp"], time_stop_s=p["time_stop_s"],
-                 lag_us=p["lag_ms"] * 1000,
-                 maker_exit=not p.get("taker_exit", False))
+    tick = tick_size(symbol)
     book = OrderBook(symbol)
-    eng.book = book
+
+    engines = {}
+    for name, params, decide in runs:
+        eng = Engine(taker_bp=params["taker_bp"], stop_bp=params["stop_bp"],
+                     target_bp=params["target_bp"],
+                     time_stop_s=params["time_stop_s"],
+                     lag_us=params["lag_ms"] * 1000,
+                     maker_exit=not params.get("taker_exit", False),
+                     tick=tick)
+        eng.book = book
+        engines[name] = eng
+    signals = {name: 0 for name, _, _ in runs}
 
     step_us = p["step_ms"] * 1000
     next_ts = None
     ofi_hist = []            # (ts_us, приращение OFI)
     prev_bid = prev_ask = None
-    signals = 0
     order_age_us = p["order_life_s"] * 1_000_000
 
     holes = downtime(p.get("hours"))
@@ -226,9 +274,10 @@ def replay(symbol, p, decide, seed=0):
         # это просто спокойный рынок, позицию в ней держать можно.
         while hole_index < len(holes) and holes[hole_index][1] <= ts:
             if next_ts is not None and next_ts >= holes[hole_index][0]:
-                book.reset(); eng.order = None; eng.exit_order = None
-                eng.pending.clear()
-                eng.position = 0.0; prev_bid = prev_ask = None
+                book.reset(); prev_bid = prev_ask = None
+                for eng in engines.values():
+                    eng.order = None; eng.exit_order = None
+                    eng.pending.clear(); eng.position = 0.0
                 next_ts = holes[hole_index][1]
             hole_index += 1
         payload = json.loads(r["payload"])
@@ -249,7 +298,8 @@ def replay(symbol, p, decide, seed=0):
                             a[1] - prev_ask[1] if a[0] == prev_ask[0] else -prev_ask[1])
                         ofi_hist.append((ts, d))
                     prev_bid, prev_ask = b, a
-                eng.resync_queue()
+                for eng in engines.values():
+                    eng.resync_queue()
         elif r["channel"] == "deal":
             deals = []
             for deal in (payload if isinstance(payload, list) else [payload]):
@@ -258,13 +308,15 @@ def replay(symbol, p, decide, seed=0):
                                   0 if int(deal["T"]) == 1 else 1))
                 except (KeyError, TypeError, ValueError):
                     continue
-            eng.on_trades(ts, deals)
+            for eng in engines.values():
+                eng.on_trades(ts, deals)
         elif r["channel"] == "gap":
             book.ready = False
             prev_bid = prev_ask = None
 
-        eng.activate(ts)
-        eng.manage(ts)
+        for eng in engines.values():
+            eng.activate(ts)
+            eng.manage(ts)
 
         if next_ts is None or ts < next_ts + step_us:
             continue
@@ -277,28 +329,27 @@ def replay(symbol, p, decide, seed=0):
         if not b or not a or b[0] >= a[0]:
             continue
 
-        # снять зависшую заявку, которую так и не налили
-        if eng.order and ts - eng.order.placed_us > order_age_us:
-            eng.cancel()
-
-        if eng.position or eng.order or eng.pending:
-            continue
-
         qb, qa = b[1], a[1]
         state = {
             "imb": (qb - qa) / (qb + qa) if qb + qa else 0.0,
             "ofi": sum(v for _, v in ofi_hist),
             "bid": b[0], "ask": a[0],
         }
-        action = decide(state, rng)
-        if action == "buy":
-            signals += 1
-            eng.submit(ts, 0, b[0], p["size"])
-        elif action == "sell":
-            signals += 1
-            eng.submit(ts, 1, a[0], p["size"])
+        for name, params, decide in runs:
+            eng = engines[name]
+            if eng.order and ts - eng.order.placed_us > order_age_us:
+                eng.cancel()
+            if eng.position or eng.order or eng.pending:
+                continue
+            action = decide(state, rng)
+            if action == "buy":
+                signals[name] += 1
+                eng.submit(ts, 0, b[0], params["size"])
+            elif action == "sell":
+                signals[name] += 1
+                eng.submit(ts, 1, a[0], params["size"])
 
-    return eng.trades, signals
+    return {name: (engines[name].trades, signals[name]) for name, _, _ in runs}
 
 
 def strategy(p):
