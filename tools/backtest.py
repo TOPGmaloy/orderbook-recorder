@@ -247,7 +247,7 @@ def replay(symbol, p, decide, seed=0):
     return out["одна"]
 
 
-def _replay_gen(symbol, base, runs, seed=0):
+def _replay_gen(symbol, base, runs, seed=0, holes=None):
     """Много конструкций за ОДИН проход по записи.
 
     Чтение и сборка книги — самая дорогая часть, и она общая для всех
@@ -289,7 +289,9 @@ def _replay_gen(symbol, base, runs, seed=0):
     prev_bid = prev_ask = None
     order_age_us = p["order_life_s"] * 1_000_000
 
-    holes = downtime(p.get("hours"))
+    # Простои записи считаются один раз снаружи и передаются сюда: иначе
+    # каждый из восьми генераторов сканирует все файлы ещё до начала работы.
+    holes = downtime(p.get("hours")) if holes is None else holes
     hole_index = 0
     # Строки подаются снаружи через send(): так один проход по файлам кормит
     # сразу все инструменты, вместо того чтобы каждый читал запись заново.
@@ -450,11 +452,12 @@ def replay_all(symbols, base, runs_by_symbol, seed=0):
     в списки по инструментам было бы проще, но суточная запись в виде объектов
     Python — это гигабайты, и сервер бы не пережил.
     """
+    holes = downtime(base.get("hours"))
     gens = {}
     for sym in symbols:
         if sym not in runs_by_symbol:
             continue
-        gen = _replay_gen(sym, base, runs_by_symbol[sym], seed)
+        gen = _replay_gen(sym, base, runs_by_symbol[sym], seed, holes=holes)
         next(gen)                       # довести до первого yield
         gens[sym] = gen
 

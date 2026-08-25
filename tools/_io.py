@@ -61,7 +61,8 @@ def closed_files(hours=None, quiet=False):
     return [path for _, path in stamped]
 
 
-def stream(symbol=None, hours=None, channels=None, quiet=False, progress=False):
+def stream(symbol=None, hours=None, channels=None, quiet=False,
+           progress=False, columns=None):
     """Строки записи по возрастанию времени, по файлу за раз.
 
     `progress` печатает, сколько файлов пройдено: на суточной записи разбор
@@ -75,7 +76,9 @@ def stream(symbol=None, hours=None, channels=None, quiet=False, progress=False):
             print(f"  ... файл {number} из {len(paths)}, "
                   f"{time.monotonic() - started:.0f} с", flush=True)
         try:
-            table = pq.read_table(path)
+            # columns=None читает и payload — самую тяжёлую колонку. Когда
+            # нужны только метки времени, это разница в десятки раз.
+            table = pq.read_table(path, columns=columns)
             if symbol is not None:
                 # отсеиваем инструмент до превращения в объекты Python:
                 # при шести инструментах это сразу вшестеро меньше работы
@@ -132,7 +135,8 @@ def downtime(hours=None, quiet=True):
     половиной минут — значит служба стояла.
     """
     marks = [row[TS_COLUMN] for row in
-             stream(channels=("status",), hours=hours, quiet=quiet)]
+             stream(channels=("status",), hours=hours, quiet=quiet,
+                    columns=[TS_COLUMN, "symbol", "channel"])]
     marks.sort()
     holes = []
     for a, b in zip(marks, marks[1:]):
