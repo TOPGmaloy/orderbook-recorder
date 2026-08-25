@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from tools.backtest import replay_multi, strategy, random_control
+from tools.backtest import (replay_multi, strategy,
+                            reversal_strategy, random_control)
 
 # Конструкции выбраны из измеренной динамики, а не перебором:
 # медиана движения за 60 с — 2.155 б.п., поэтому стоп в 2 б.п. стоит внутри
@@ -103,13 +104,20 @@ def run_one(symbol, a, summary):
     base = {"hours": a.hours, "lag_ms": a.lag_ms, "step_ms": 200,
             "taker_bp": a.taker_bp, "size": 1.0, "order_life_s": 10,
             "stop_bp": 2, "target_bp": 2, "time_stop_s": 60,
-            "imb_th": 0.4, "ofi_th": 0.0}
+            "imb_th": 0.4, "ofi_th": 0.0, "move_th": 3.0}
 
     runs = []
     for name, stop, target, timer, th in GRID:
         params = dict(base, stop_bp=stop, target_bp=target,
                       time_stop_s=timer, imb_th=th)
         runs.append((name, params, strategy(params)))
+    # конструкции на сигнале разворота: вход лимиткой против резкого движения
+    for move_th, target, timer in ((3.0, 2, 60), (3.0, 3, 120),
+                                   (5.0, 3, 120), (3.0, 5, 300)):
+        params = dict(base, stop_bp=999, target_bp=target,
+                      time_stop_s=timer, move_th=move_th)
+        runs.append((f"разворот {move_th:g}сигм/цель {target}/{timer}с",
+                     params, reversal_strategy(params)))
     control = dict(base, stop_bp=999, target_bp=3, time_stop_s=60)
     runs.append(("СЛУЧАЙНЫЙ ВХОД", control, random_control(0.01)))
 

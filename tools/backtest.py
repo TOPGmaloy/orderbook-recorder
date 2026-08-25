@@ -32,6 +32,7 @@ import argparse
 import json
 import math
 import sys
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -249,6 +250,10 @@ def replay_multi(symbol, base, runs, seed=0):
     book = OrderBook(symbol)
 
     spreads = []
+    # история середины для сигнала разворота: движение за прошлую секунду
+    mid_hist = deque(maxlen=200)
+    warmup = []          # первые замеры идут только на оценку сигмы
+    sigma = None
     engines = {}
     for name, params, decide in runs:
         eng = Engine(taker_bp=params["taker_bp"], stop_bp=params["stop_bp"],
@@ -331,8 +336,26 @@ def replay_multi(symbol, base, runs, seed=0):
             continue
 
         spreads.append((a[0] - b[0]) / ((a[0] + b[0]) / 2) * 1e4)
+        now_mid = (a[0] + b[0]) / 2
+        mid_hist.append((ts, now_mid))
+        # движение за прошлую секунду
+        past = next((m for t0, m in mid_hist if ts - t0 <= 1_000_000), None)
+        move_bp = (now_mid / past - 1) * 1e4 if past else 0.0
+        # Сигма оценивается по первым замерам и замораживается: считать её по
+        # всей записи значило бы подглядывать в будущее.
+        if sigma is None:
+            warmup.append(move_bp)
+            # Порог разогрева небольшой намеренно: на коротких записях
+            # большой съедал бы всю выборку и стратегия молча не торговала.
+            if len(warmup) >= 1000:
+                est = float(np.std(warmup))
+                if est > 0:
+                    sigma = est
+            qb, qa = b[1], a[1]
+            continue
         qb, qa = b[1], a[1]
         state = {
+            "move_sig": move_bp / sigma,
             "imb": (qb - qa) / (qb + qa) if qb + qa else 0.0,
             "ofi": sum(v for _, v in ofi_hist),
             "bid": b[0], "ask": a[0],
@@ -351,6 +374,10 @@ def replay_multi(symbol, base, runs, seed=0):
                 signals[name] += 1
                 eng.submit(ts, 1, a[0], params["size"])
 
+    import os
+    if os.getenv("OBR_DEBUG"):
+        print(f"[отладка] узлов сетки: {len(spreads)}, разогрев: {len(warmup)}, "
+              f"сигма: {sigma}", file=sys.stderr)
     out = {name: (engines[name].trades, signals[name]) for name, _, _ in runs}
     out["__spread__"] = (sorted(spreads)[len(spreads) // 2] if spreads else 0.0,
                          len(spreads))
@@ -363,6 +390,24 @@ def strategy(p):
         if s["imb"] > p["imb_th"] and s["ofi"] > p["ofi_th"]:
             return "buy"
         if s["imb"] < -p["imb_th"] and s["ofi"] < -p["ofi_th"]:
+            return "sell"
+        return None
+    return decide
+
+
+def reversal_strategy(p):
+    """Фейд резкого движения: цена рванула вниз — покупаем, вверх — продаём.
+
+    Вход лимиткой на своей стороне книги. На инструментах с широким спредом
+    это принципиально: входя пассивно, спред зарабатываешь, а не платишь.
+    Именно поэтому сигнал в 0.4-1.0 б.п., безнадёжный для тейкера, здесь ещё
+    может окупиться.
+    """
+    def decide(s, rng):
+        move = s.get("move_sig", 0.0)
+        if move <= -p["move_th"]:
+            return "buy"
+        if move >= p["move_th"]:
             return "sell"
         return None
     return decide
