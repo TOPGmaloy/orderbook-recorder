@@ -304,22 +304,32 @@ def main():
         print("  Если не растёт или падает — мы ловим шум, а не событие.")
         print("=" * 92)
         spans = np.array([m["span"] for m in meta])
-        print(f"    {'порог':<10}{'событий':>9}{'в сутки':>9}"
-              + "".join(f"{f'{h}с ср.':>10}{'t':>7}" for h in (30, 60)))
-        for th in (1.5, 2.5, 4.0, 6.0, 9.0, 13.0):
+        print(f"    {'порог':<8}{'событий':>8}{'/сутки':>8}"
+              f"{'30с ср.':>9}{'t':>6}{'60с ср.':>9}{'t':>6}"
+              f"{'60с 1-я':>9}{'60с 2-я':>9}")
+        for th in (1.5, 2.5, 4.0, 6.0, 9.0, 13.0, 20.0):
             mask = spans >= th
-            if mask.sum() < 10:
+            if mask.sum() < 8:
                 continue
-            row = f"    {th:<10.1f}{int(mask.sum()):>9}{mask.sum()/max(span_h,1)*24:>9.0f}"
+            row = (f"    {th:<8.1f}{int(mask.sum()):>8}"
+                   f"{mask.sum()/max(span_h,1)*24:>8.0f}")
             for hi in (1, 2):
-                sub = arr[mask][:, hi]
-                sub_ts = stamps[mask]
+                sub, sub_ts = arr[mask][:, hi], stamps[mask]
                 good = np.isfinite(sub)
-                if good.sum() < 10:
-                    row += f"{'—':>10}{'—':>7}"
+                if good.sum() < 8:
+                    row += f"{'—':>9}{'—':>6}"
                     continue
                 t_val, _ = block_t(sub[good], sub_ts[good])
-                row += f"{sub[good].mean():>10.3f}{t_val:>7.2f}"
+                row += f"{sub[good].mean():>9.3f}{t_val:>6.2f}"
+            # половины записи по горизонту 60 с: знак обязан совпасть
+            sub, sub_ts = arr[mask][:, 2], stamps[mask]
+            good = np.isfinite(sub)
+            sub, sub_ts = sub[good], sub_ts[good]
+            if len(sub) >= 8:
+                cut = sub_ts.min() + (sub_ts.max() - sub_ts.min()) / 2
+                for m in (sub_ts < cut, sub_ts >= cut):
+                    row += (f"{sub[m].mean():>9.2f}" if m.sum() >= 3
+                            else f"{'—':>9}")
             print(row)
 
     print("\n" + "=" * 92)
