@@ -37,38 +37,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 
-from config import DATA_DIR
 from recorder.book import OrderBook
+from tools._io import stream
 
 
 # --- чтение записи ----------------------------------------------------------
 
-def read_closed(files):
-    tables, skipped = [], []
-    for f in files:
-        try:
-            tables.append(pq.read_table(f))
-        except Exception:
-            skipped.append(f.name)
-    if skipped:
-        print(f"(пропущен файл в работе: {', '.join(skipped)})")
-    if not tables:
-        sys.exit("Ни одного закрытого файла.")
-    return pa.concat_tables(tables)
-
-
-def events(symbol):
-    files = sorted(DATA_DIR.rglob("events_*.parquet"))
-    if not files:
-        sys.exit(f"В {DATA_DIR} пусто.")
-    rows = [r for r in read_closed(files).to_pylist() if r["symbol"] == symbol]
-    rows.sort(key=lambda r: r["ts_local_us"])
-    if not rows:
-        sys.exit(f"Нет записей по {symbol}.")
-    return rows
+def events(symbol, hours=None):
+    """Поток событий по инструменту. Генератор, а не список: суточная запись
+    в виде объектов Python не помещается в память сервера."""
+    return stream(symbol=symbol, hours=hours)
 
 
 # --- исполнение -------------------------------------------------------------
@@ -223,7 +202,7 @@ class Engine:
 
 def replay(symbol, p, decide, seed=0):
     """Один прогон записи. `decide(state, rng)` возвращает 'buy' / 'sell' / None."""
-    rows = events(symbol)
+    rows = events(symbol, p.get("hours"))
     rng = np.random.default_rng(seed)
     eng = Engine(taker_bp=p["taker_bp"], stop_bp=p["stop_bp"],
                  target_bp=p["target_bp"], time_stop_s=p["time_stop_s"],
@@ -362,6 +341,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--symbol", default="BTC_USDT")
+    ap.add_argument("--hours", type=float, default=None,
+                    help="сколько последних часов брать (по умолчанию всё)")
     ap.add_argument("--stop-bp", type=float, default=2.0)
     ap.add_argument("--target-bp", type=float, default=2.0)
     ap.add_argument("--time-stop-s", type=float, default=60)

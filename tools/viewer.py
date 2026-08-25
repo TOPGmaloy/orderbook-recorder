@@ -22,32 +22,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-from config import DATA_DIR
 from recorder.book import OrderBook
-
-
-def read_closed(files):
-    """Читает parquet, пропуская тот файл, в который сейчас идёт запись.
-
-    У parquet footer дописывается при закрытии файла, поэтому текущий файл
-    прочитать нельзя — он станет доступен после ротации (каждые
-    ROTATE_MINUTES) или после остановки службы. Это не ошибка, а нормальная
-    работа: молча пропускаем его.
-    """
-    tables, skipped = [], []
-    for f in files:
-        try:
-            tables.append(pq.read_table(f))
-        except Exception:
-            skipped.append(f.name)
-    if skipped:
-        print(f"пропущен файл в работе: {', '.join(skipped)}", file=sys.stderr)
-    if not tables:
-        sys.exit("Ни одного закрытого файла — подожди ротации или останови службу.")
-    return pa.concat_tables(tables)
+from tools._io import stream
 
 
 def contract_size(symbol):
@@ -72,18 +48,15 @@ def contract_size(symbol):
     return fallback.get(symbol, 1.0)
 
 
-def load_rows(symbol):
-    files = sorted(DATA_DIR.rglob("events_*.parquet"))
-    if not files:
-        sys.exit(f"В {DATA_DIR} пусто — сначала запиши данные.")
-    table = read_closed(files)
-    rows = [r for r in table.to_pylist() if r["symbol"] in (symbol, "")]
-    rows.sort(key=lambda r: r["ts_local_us"])
-    return [r for r in rows if r["symbol"] == symbol]
+def load_rows(symbol, minutes):
+    """Только нужное окно плюс запас на разгон книги — читать всю историю ради
+    восьми минут картинки незачем, а на сервере это ещё и не влезет в память."""
+    hours = max(0.5, minutes / 60 * 1.5 + 0.34)
+    return list(stream(symbol=symbol, hours=hours))
 
 
 def build(symbol, minutes, step_ms, bins, depth_rows):
-    rows = load_rows(symbol)
+    rows = load_rows(symbol, minutes)
     if not rows:
         sys.exit(f"Нет записей по {symbol}.")
 
