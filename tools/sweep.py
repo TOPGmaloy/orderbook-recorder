@@ -165,6 +165,17 @@ def build_runs(a):
                       delta_th=delta_th, taker_entry=True)
         runs.append((f"поток ПО РЫНКУ {delta_th:g}с/цель {target}/{timer//60}м",
                      params, delta_strategy(params)))
+    # СОГЛАСОВАННЫЙ КОНТРОЛЬ. Обычного случайного входа мало: цель 8 при стопе
+    # 16 — асимметричный барьер, и он даёт высокий винрейт сам по себе, без
+    # всякого сигнала. Поэтому к каждой конструкции по потоку идёт двойник с
+    # теми же целью, стопом, таймером и входом по рынку, но со случайным
+    # направлением. Разница между ними и есть вклад сигнала.
+    for delta_th, target, stop, timer in ((2.0, 8, 16, 300), (3.0, 8, 16, 300),
+                                          (3.0, 15, 25, 900), (4.0, 20, 30, 900)):
+        params = dict(base, stop_bp=stop, target_bp=target, time_stop_s=timer,
+                      taker_entry=True)
+        runs.append((f"   контроль цель {target}/{timer//60}м",
+                     params, random_control(0.004)))
     control = dict(base, stop_bp=999, target_bp=3, time_stop_s=60)
     runs.append(("СЛУЧАЙНЫЙ ВХОД", control, random_control(0.01)))
 
