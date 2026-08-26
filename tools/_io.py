@@ -62,7 +62,7 @@ def closed_files(hours=None, quiet=False):
 
 
 def stream(symbol=None, hours=None, channels=None, quiet=False,
-           progress=False, columns=None):
+           progress=False, columns=None, order="local"):
     """Строки записи по возрастанию времени, по файлу за раз.
 
     `progress` печатает, сколько файлов пройдено: на суточной записи разбор
@@ -87,7 +87,17 @@ def stream(symbol=None, hours=None, channels=None, quiet=False,
             del table
         except Exception:
             continue
-        rows.sort(key=lambda r: r[TS_COLUMN])
+        if order == "exch":
+            # Порядок БИРЖЕВОГО времени. Стакан приходит пачками раз в 200 мс,
+            # лента — отдельными сообщениями, задержки у них разные. В порядке
+            # получения сделка может прикладываться к книге, которая ушла
+            # вперёд или отстала, и исполнение выглядит невозможным, хотя на
+            # бирже оно состоялось. Здесь события выстраиваются так, как они
+            # происходили на матчинге.
+            rows.sort(key=lambda r: (r["ts_exch_ms"] or r[TS_COLUMN] // 1000,
+                                     r[TS_COLUMN]))
+        else:
+            rows.sort(key=lambda r: r[TS_COLUMN])
         for row in rows:
             if channels is not None and row["channel"] not in channels:
                 continue

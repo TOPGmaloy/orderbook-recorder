@@ -65,10 +65,10 @@ def tick_size(symbol):
     return fallback.get(symbol, 0.01)
 
 
-def events(symbol, hours=None):
+def events(symbol, hours=None, order="local"):
     """Поток событий по инструменту. Генератор, а не список: суточная запись
     в виде объектов Python не помещается в память сервера."""
-    return stream(symbol=symbol, hours=hours)
+    return stream(symbol=symbol, hours=hours, order=order)
 
 
 # --- исполнение -------------------------------------------------------------
@@ -495,7 +495,8 @@ def _drive(gen, rows):
 def replay_multi(symbol, base, runs, seed=0):
     """Много конструкций на одном инструменте за один проход по записи."""
     return _drive(_replay_gen(symbol, base, runs, seed),
-                  events(symbol, base.get("hours")))
+                  events(symbol, base.get("hours"),
+                         order=base.get("order", "local")))
 
 
 def replay_all(symbols, base, runs_by_symbol, seed=0):
@@ -519,7 +520,8 @@ def replay_all(symbols, base, runs_by_symbol, seed=0):
         next(gen)                       # довести до первого yield
         gens[sym] = gen
 
-    for r in stream(hours=base.get("hours"), progress=True):
+    for r in stream(hours=base.get("hours"), progress=True,
+                    order=base.get("order", "local")):
         gen = gens.get(r["symbol"])
         if gen is not None:
             gen.send(r)

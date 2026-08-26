@@ -100,6 +100,8 @@ def main():
     ap.add_argument("--lag-ms", type=int, default=200)
     ap.add_argument("--taker-bp", type=float, default=1.0)
     ap.add_argument("--notional", type=float, default=2500)
+    ap.add_argument("--exch-time", action="store_true",
+                    help="проигрывать в порядке биржевого времени, а не получения")
     ap.add_argument("--full", action="store_true",
                     help="гонять и заведомо мёртвые конструкции (медленнее втрое)")
     ap.add_argument("--profile", action="store_true",
@@ -157,7 +159,8 @@ def build_runs(a):
     base = {"hours": a.hours, "lag_ms": a.lag_ms, "step_ms": 200,
             "taker_bp": a.taker_bp, "size": 1.0, "order_life_s": 10,
             "stop_bp": 2, "target_bp": 2, "time_stop_s": 60,
-            "imb_th": 0.4, "ofi_th": 0.0, "move_th": 3.0, "delta_th": 2.0}
+            "imb_th": 0.4, "ofi_th": 0.0, "move_th": 3.0, "delta_th": 2.0,
+            "order": "exch" if getattr(a, "exch_time", False) else "local"}
 
     runs = []
     # По умолчанию считаем только живое. Восемь пассивных конструкций и
