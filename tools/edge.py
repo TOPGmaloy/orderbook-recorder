@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from tools.analyze import build_grids, rolling
+from tools.analyze import build_grids, rolling, FILL_NOTIONALS
 from tools.backtest import taker_fee_bp, taker_fee_spread
 from tools.scale import rolling_sigma
 
@@ -92,6 +92,11 @@ def measure(symbol, g, a, fee):
     with np.errstate(invalid="ignore", divide="ignore"):
         sig = np.where(np.isfinite(scale) & (scale > 0), raw / scale, np.nan)
 
+    # цена исполнения выбранного объёма; на старых сетках её нет — тогда
+    # считаем по спреду касания, как раньше, и говорим об этом в шапке
+    buy_bp = g.get(f"buy{a.notional}")
+    sell_bp = g.get(f"sell{a.notional}")
+
     rows = []
     for h_ms in HORIZONS_MS:
         h = max(1, h_ms // step)
@@ -104,10 +109,20 @@ def measure(symbol, g, a, fee):
         fut = np.full(n, np.nan)
         fut[:end] = np.where(
             same, (mid[lag + h: lag + h + end] / mid[lag: lag + end] - 1) * 1e4, np.nan)
-        # издержки круга: комиссия обеих сторон плюс переход через спред на
-        # входе и на выходе (по половине спреда с каждой стороны)
+        # Издержки круга: комиссия обеих сторон плюс НАСТОЯЩАЯ цена входа и
+        # выхода по рынку для выбранного объёма. Спред касания — это цена
+        # заявки, стремящейся к нулю; заявка на реальные деньги идёт по
+        # стакану вглубь. Лонг покупает на входе и продаёт на выходе, шорт
+        # наоборот, и книга на выходе своя — поэтому берутся четыре разных
+        # узла, а не удвоенный спред.
         cost = np.full(n, np.nan)
-        cost[:end] = 2 * fee + (spread[lag: lag + end] + spread[lag + h: lag + h + end]) / 2
+        if buy_bp is None:
+            cost[:end] = 2 * fee + (spread[lag: lag + end]
+                                    + spread[lag + h: lag + h + end]) / 2
+        else:
+            long_cost = buy_bp[lag: lag + end] + sell_bp[lag + h: lag + h + end]
+            short_cost = sell_bp[lag: lag + end] + buy_bp[lag + h: lag + h + end]
+            cost[:end] = 2 * fee + np.where(sig[:end] > 0, long_cost, short_cost)
 
         block_us = max(1_800_000_000, 4 * h_ms * 1000)
         rng = np.random.default_rng(0)
@@ -142,6 +157,40 @@ def measure(symbol, g, a, fee):
                          float(net_b[second].mean()) if second.any() else float("nan"),
                          float(ctrl_b.mean()), share))
     return rows
+
+
+def depth_note(g, mask=None):
+    """Во что обходится круг по рынку разного размера — медиана по записи."""
+    out = []
+    for notional in FILL_NOTIONALS:
+        buy, sell = g.get(f"buy{notional}"), g.get(f"sell{notional}")
+        if buy is None:
+            continue
+        both = buy + sell
+        if mask is not None:
+            both = both[mask]
+        good = np.isfinite(both)
+        if good.sum() < 100:
+            out.append(f"${notional:,} стакан не держит")
+            continue
+        miss = (1 - good.mean()) * 100
+        tail = f" (не хватало книги в {miss:.0f}% узлов)" if miss > 1 else ""
+        out.append(f"${notional:,} -> {np.median(both[good]):.3f} б.п.{tail}")
+    return "   ".join(out)
+
+
+def miss_share(g, notional):
+    """Доля узлов, где записанной книги не хватило на такой объём.
+
+    Такие узлы из замера выпадают, и это не мелочь: книга не набирается там,
+    где её только что пересобирали после разрыва, — то есть в самые рваные
+    моменты. Если доля заметная, результат смещён в сторону спокойных минут,
+    и знать об этом надо до, а не после.
+    """
+    both = g.get(f"buy{notional}")
+    if both is None:
+        return 0.0
+    return float((~np.isfinite(both + g[f"sell{notional}"])).mean())
 
 
 def show(symbol, rows, fee, spread_med):
@@ -194,7 +243,7 @@ def selftest():
     h = h_ms // step
     n = 1_080_000                     # 60 часов при шаге 200 мс
     spread, fee = 1.0, 0.0
-    args = argparse.Namespace(step_ms=step, lag_ms=step)
+    args = argparse.Namespace(step_ms=step, lag_ms=step, notional=2500)
     ok = True
 
     cases = ((4.0, 0.05, "сигнал есть, шума почти нет"),
@@ -213,7 +262,12 @@ def selftest():
              "seg": np.zeros(n, dtype=np.int32),
              "mid": 100.0 * np.exp(np.cumsum(per_node) / 1e4),
              "spread": np.full(n, spread),
-             "delta_raw": np.repeat(value, h)[:n]}
+             "delta_raw": np.repeat(value, h)[:n],
+             # цена исполнения нарочно НЕсимметричная: покупка дороже продажи.
+             # Круг всё равно обязан выйти в spread — и у лонга, и у шорта,
+             # иначе перепутаны стороны на входе или на выходе.
+             "buy2500": np.full(n, spread * 0.8, dtype=np.float32),
+             "sell2500": np.full(n, spread * 0.2, dtype=np.float32)}
         row = next(r for r in measure("ТЕСТ", g, args, fee)
                    if r[0] == h_ms and r[1] == 2.0)
         _, _, n_sig, n_blk, gross, net, t, first, second, ctrl, _ = row
@@ -253,6 +307,10 @@ def main():
                          "в число наблюдений, и урезать окно нечем платить")
     ap.add_argument("--step-ms", type=int, default=200)
     ap.add_argument("--lag-ms", type=int, default=200)
+    ap.add_argument("--notional", type=int, default=2500,
+                    choices=FILL_NOTIONALS,
+                    help="объём заявки в долларах: издержки считаются как "
+                         "настоящая цена исполнения такого объёма по стакану")
     ap.add_argument("--taker-bp", type=float, default=None,
                     help="комиссия тейкера; по умолчанию берётся с биржи "
                          "поинструментно")
@@ -273,8 +331,8 @@ def main():
     print("=" * 100)
     print("  СКОЛЬКО ОСТАЁТСЯ ОТ СИГНАЛА ПОСЛЕ ИЗДЕРЖЕК")
     print("  Вход и выход ПО РЫНКУ в сторону дельты сделок за 5 с.")
-    print("  «Чистое» — уже за вычетом комиссии и спреда. Считается по всем")
-    print("  сигналам сразу, поэтому шума в разы меньше, чем в sweep.")
+    print(f"  «Чистое» — за вычетом комиссии и НАСТОЯЩЕЙ цены исполнения")
+    print(f"  заявки на ${a.notional:,} по стакану, а не спреда касания.")
     print("=" * 100)
 
     survivors = {}
@@ -286,6 +344,14 @@ def main():
         fee = a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
         rows = measure(symbol, g, a, fee)
         show(symbol, rows, fee, float(np.median(g["spread"])))
+        print(f"  цена круга по рынку:  {depth_note(g)}")
+        if f"buy{a.notional}" not in g:
+            print("  ВНИМАНИЕ: сетка старая, цены исполнения в ней нет — "
+                  "считано по спреду касания")
+        elif miss_share(g, a.notional) > 0.05:
+            print(f"  ВНИМАНИЕ: в {miss_share(g, a.notional)*100:.0f}% узлов "
+                  f"книги не хватало на ${a.notional:,} — они выброшены, "
+                  f"и результат смещён в сторону спокойных моментов")
         for h_ms, th, _, _, _, net, t, first, second, ctrl, _ in rows:
             if np.isfinite(net) and net > 0 and first > 0 and second > 0 and t > 3:
                 survivors.setdefault((h_ms, th), []).append(symbol)

@@ -118,6 +118,22 @@ def taker_fee_bp(symbol):
     return float(row.get("takerFeeRate") or 0) * 1e4
 
 
+def contract_size(symbol):
+    """Сколько единиц базового актива в одном контракте.
+
+    Нужно, чтобы перевести объём в стакане (он в контрактах) в доллары: на
+    BTC контракт это 0.0001 монеты, на PEPE — десять миллионов. Без этого
+    «заявка на $2500» не выражается в тех числах, которые лежат в записи.
+    """
+    row = contract_detail().get(symbol)
+    if row is None:
+        return None
+    try:
+        return float(row.get("contractSize") or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
 def taker_fee_spread(symbol):
     """Разброс ставок, который биржа выдала за три опроса.
 

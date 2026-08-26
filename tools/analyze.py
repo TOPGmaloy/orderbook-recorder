@@ -44,11 +44,18 @@ HORIZONS_MS = [1000, 5000, 30000, 60000, 300000, 900000, 1800000]
 CACHE_DIR = Path(__file__).resolve().parents[1] / "cache"
 
 
+# Объёмы, для которых считается настоящая цена входа по рынку. Спред касания
+# — это цена заявки, стремящейся к нулю; настоящая заявка идёт по стакану
+# вглубь и платит больше. Пока это не измерено, любое «преимущество в 1.5 б.п.»
+# остаётся преимуществом бесконечно малой заявки.
+FILL_NOTIONALS = (500, 2500, 10000)
+LADDER_DEPTH = 50          # глубже по записи всё равно не наберётся
+
 # Версия сборщика сетки. Кэш ключуется отпечатком ДАННЫХ, и без этого номера
 # сетка, посчитанная прежним кодом, молча подхватывалась новым. Так и вышло:
 # одиночный и многоинструментный сборщики писали в одно имя и давали на одном
 # куске 16732 узла против 19142. Меняешь смысл сетки — поднимай номер.
-GRID_VERSION = 2
+GRID_VERSION = 3
 
 
 def _cache_key(symbol, step_ms, hours):
@@ -147,6 +154,9 @@ _COLUMN_TYPES = {"ts": np.int64, "seg": np.int32, "mid": np.float64,
                  "spread": np.float32, "imb1": np.float32, "imb5": np.float32,
                  "imb10": np.float32, "micro": np.float32,
                  "ofi_raw": np.float32, "delta_raw": np.float32}
+for _n in FILL_NOTIONALS:                     # цена входа и выхода по рынку
+    _COLUMN_TYPES[f"buy{_n}"] = np.float32    # переплата к середине при покупке
+    _COLUMN_TYPES[f"sell{_n}"] = np.float32   # недополучение при продаже
 
 
 class _GridState:
@@ -165,12 +175,39 @@ class _GridState:
         self.next_ts = None
         self.segment = 0
         self.cols = {k: _Column(t) for k, t in _COLUMN_TYPES.items()}
+        from tools.backtest import contract_size
+        self.contract_size = contract_size(symbol)
         self.ofi = self.buy = self.sell = 0.0
         self.prev_bid = self.prev_ask = None
 
-    def _tops(self, side, n, high_first):
+    def _ladder(self, side, high_first):
+        """Верхние уровни стороны книги как (цена, объём), по порядку."""
         picker = self.heapq.nlargest if high_first else self.heapq.nsmallest
-        return sum(side[p] for p in picker(n, side))
+        return [(p, side[p]) for p in picker(LADDER_DEPTH, side)]
+
+    def _walk(self, ladder, mid, notional, buying):
+        """Средняя цена исполнения рыночной заявки на notional долларов.
+
+        Возвращает переплату к середине в б.п. При объёме, стремящемся к нулю,
+        это ровно половина спреда; дальше заявка идёт вглубь и платит больше.
+        NaN означает, что записанных уровней на такой объём не хватило —
+        считать там нечего, и такие узлы честнее выбросить, чем занизить.
+        """
+        if not self.contract_size:
+            return float("nan")
+        need, value, qty = float(notional), 0.0, 0.0
+        for price, volume in ladder:
+            available = price * volume * self.contract_size
+            take = available if available < need else need
+            qty += take / price
+            value += take
+            need -= take
+            if need <= 0:
+                break
+        if need > 0 or qty <= 0:
+            return float("nan")
+        vwap = value / qty
+        return (vwap - mid) / mid * 1e4 if buying else (mid - vwap) / mid * 1e4
 
     def _emit(self):
         b, a = self.book.best()
@@ -182,10 +219,17 @@ class _GridState:
         c["mid"].append(m); c["spread"].append((a[0] - b[0]) / m * 1e4)
         qb, qa = b[1], a[1]
         c["imb1"].append((qb - qa) / (qb + qa) if qb + qa else 0.0)
+        # обе стороны книги берутся ОДИН раз на узел: и дисбалансы, и цена
+        # исполнения считаются из одной и той же лесенки
+        lad_b = self._ladder(self.book.bids, True)
+        lad_a = self._ladder(self.book.asks, False)
         for n, key in ((5, "imb5"), (10, "imb10")):
-            sb = self._tops(self.book.bids, n, True)
-            sa = self._tops(self.book.asks, n, False)
+            sb = sum(v for _, v in lad_b[:n])
+            sa = sum(v for _, v in lad_a[:n])
             c[key].append((sb - sa) / (sb + sa) if sb + sa else 0.0)
+        for notional in FILL_NOTIONALS:
+            c[f"buy{notional}"].append(self._walk(lad_a, m, notional, True))
+            c[f"sell{notional}"].append(self._walk(lad_b, m, notional, False))
         c["micro"].append(((b[0] * qa + a[0] * qb) / (qa + qb) - m) / m * 1e4)
         c["ofi_raw"].append(self.ofi)
         c["delta_raw"].append(self.buy - self.sell)
