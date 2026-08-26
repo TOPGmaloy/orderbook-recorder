@@ -35,7 +35,8 @@ import numpy as np
 
 from tools.backtest import (replay_multi, replay_all, strategy,
                             reversal_strategy, delta_strategy,
-                            random_control, taker_fee_bp)
+                            random_control, taker_fee_bp,
+                            taker_fee_spread)
 
 # Конструкции выбраны из измеренной динамики, а не перебором:
 # медиана движения за 60 с — 2.155 б.п., поэтому стоп в 2 б.п. стоит внутри
@@ -325,6 +326,15 @@ def build_runs(a, taker_bp):
     return base, runs
 
 
+def _fee_note(symbol, fee):
+    if fee == 0:
+        return " (БЕЗ КОМИССИИ)"
+    lo, hi = taker_fee_spread(symbol)
+    if lo is not None and hi != lo:
+        return f" (биржа отвечала от {lo:g} до {hi:g} — взята худшая)"
+    return ""
+
+
 def report_one(symbol, a, result, runs, summary):
     # Порядок времени печатается наравне с остальными условиями: именно он
     # превращал +9.6 б.п. в -0.15, и без пометки сохранённый отчёт нельзя
@@ -335,7 +345,7 @@ def report_one(symbol, a, result, runs, summary):
     fee = fee_for(a, symbol)
     print(f"  {symbol}   последние {a.hours:g} ч   порядок {order}   "
           f"задержка {a.lag_ms} мс   "
-          f"тейкер {fee:g} б.п.{' (БЕЗ КОМИССИИ)' if fee == 0 else ''}   "
+          f"тейкер {fee:g} б.п.{_fee_note(symbol, fee)}   "
           f"номинал ${a.notional:,.0f}")
     print("=" * 96)
 

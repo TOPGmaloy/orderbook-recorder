@@ -42,11 +42,13 @@ import numpy as np
 
 from recorder.book import OrderBook
 from tools._io import stream, downtime
+from tools.scale import RollingSigma
 
 
 # --- чтение записи ----------------------------------------------------------
 
 _DETAIL = None
+_FEE_SEEN = {}
 
 
 def contract_detail():
@@ -69,14 +71,13 @@ def contract_detail():
                 sym = row.get("symbol")
                 if not sym:
                     continue
+                rate = float(row.get("takerFeeRate") or 0) * 1e4
+                _FEE_SEEN.setdefault(sym, set()).add(round(rate, 4))
                 prev = merged.get(sym)
                 if prev is None:
                     merged[sym] = row
-                else:
-                    # худшая (наибольшая) ставка из опросов
-                    if float(row.get("takerFeeRate") or 0) > \
-                       float(prev.get("takerFeeRate") or 0):
-                        merged[sym] = row
+                elif rate > float(prev.get("takerFeeRate") or 0) * 1e4:
+                    merged[sym] = row      # худшая (наибольшая) ставка из опросов
     except Exception:
         pass
     _DETAIL = merged
@@ -115,6 +116,18 @@ def taker_fee_bp(symbol):
     if row.get("isZeroFeeSymbol"):
         return 0.0
     return float(row.get("takerFeeRate") or 0) * 1e4
+
+
+def taker_fee_spread(symbol):
+    """Разброс ставок, который биржа выдала за три опроса.
+
+    Нужен, чтобы разброс был виден в отчёте, а не прятался. На BTC эндпоинт
+    отвечал и 1, и 2, и 4 б.п. — на нулевых инструментах разброса нет вовсе
+    (`isZeroFeeSymbol` держится стабильно), поэтому решения принимаем по ним.
+    """
+    contract_detail()
+    seen = sorted(_FEE_SEEN.get(symbol, []))
+    return (seen[0], seen[-1]) if seen else (None, None)
 
 
 def events(symbol, hours=None, order="local"):
@@ -343,11 +356,12 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
     prev_mid = None
     # история середины для сигнала разворота: движение за прошлую секунду
     mid_hist = deque(maxlen=200)
-    warmup = []          # первые замеры идут только на оценку сигмы
-    sigma = None
     deal_hist = deque(maxlen=4000)   # (ts, объём со знаком) для дельты сделок
-    delta_warm = []
-    delta_sigma = None
+    # Масштаб обоих сигналов — скользящий. Замороженная сигма делала результат
+    # невоспроизводимым: сдвиг окна менял выборку сделок в разы. См. tools/scale.py
+    move_scale = RollingSigma(p["step_ms"])
+    delta_scale = RollingSigma(p["step_ms"])
+    sigma = delta_sigma = None
     engines = {}
     for name, params, decide in runs:
         eng = Engine(taker_bp=params["taker_bp"], stop_bp=params["stop_bp"],
@@ -477,25 +491,14 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
         # движение за прошлую секунду
         past = next((m for t0, m in mid_hist if ts - t0 <= 1_000_000), None)
         move_bp = (now_mid / past - 1) * 1e4 if past else 0.0
-        # Сигма оценивается по первым замерам и замораживается: считать её по
-        # всей записи значило бы подглядывать в будущее.
-        if delta_sigma is None:
-            delta_warm.append(delta_raw)
-            if len(delta_warm) >= 1000:
-                est = float(np.std(delta_warm))
-                if est > 0:
-                    delta_sigma = est
-        if sigma is None:
-            warmup.append(move_bp)
-            # Порог разогрева небольшой намеренно: на коротких записях
-            # большой съедал бы всю выборку и стратегия молча не торговала.
-            if len(warmup) >= 1000:
-                est = float(np.std(warmup))
-                if est > 0:
-                    sigma = est
-            qb, qa = b[1], a[1]
-            continue
+        # Масштаб сигналов обновляется на каждом узле и смотрит только назад:
+        # подглядывания в будущее нет, а зависимости от начала окна больше нет
+        # тоже — влияние первых минут затухает.
+        sigma = move_scale.update(move_bp)
+        delta_sigma = delta_scale.update(delta_raw)
         qb, qa = b[1], a[1]
+        if sigma is None or delta_sigma is None:
+            continue
         state = {
             "move_sig": move_bp / sigma,
             "delta_sig": (delta_raw / delta_sigma) if delta_sigma else 0.0,
@@ -519,8 +522,9 @@ def _replay_gen(symbol, base, runs, seed=0, holes=None):
 
     import os
     if os.getenv("OBR_DEBUG"):
-        print(f"[отладка] узлов сетки: {len(spreads)}, разогрев: {len(warmup)}, "
-              f"сигма: {sigma}", file=sys.stderr)
+        print(f"[отладка] узлов сетки: {len(spreads)}, "
+              f"сигма движения: {sigma}, сигма дельты: {delta_sigma}",
+              file=sys.stderr)
     out = {name: (engines[name].trades, signals[name]) for name, _, _ in runs}
     out["__spread__"] = (sorted(spreads)[len(spreads) // 2] if spreads else 0.0,
                          len(spreads))
