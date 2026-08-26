@@ -266,6 +266,25 @@ def build_runs(a):
                       delta_th=delta_th, taker_entry=True)
         runs.append((f"поток ПО РЫНКУ {delta_th:g}с/цель {target}/{timer//60}м",
                      params, delta_strategy(params)))
+    # ЧИСТО РЫНОЧНЫЕ КОНСТРУКЦИИ: и вход, и выход по рынку.
+    # Модель исполнения лимиток на этих данных недостоверна — биржевые метки
+    # идут в миллисекундах, стакан приходит пачками по 200 мс, и внутри пачки
+    # порядок событий восстановить нечем. Треть исполнений оказывается по
+    # недостижимой цене даже при правильном порядке времени. Рыночные заявки
+    # этого не касаются: они исполняются всегда и по известной цене, поэтому
+    # результат такой конструкции ничем не завышен.
+    for delta_th, target, stop, timer in ((3.0, 8, 16, 300), (4.0, 12, 20, 600),
+                                          (4.0, 20, 30, 900), (5.0, 25, 35, 900)):
+        params = dict(base, stop_bp=stop, target_bp=target, time_stop_s=timer,
+                      delta_th=delta_th, taker_entry=True, taker_exit=True)
+        runs.append((f"ТОЛЬКО РЫНОК {delta_th:g}с/цель {target}/{timer//60}м",
+                     params, delta_strategy(params)))
+    for delta_th, target, stop, timer in ((3.0, 8, 16, 300), (4.0, 20, 30, 900)):
+        params = dict(base, stop_bp=stop, target_bp=target, time_stop_s=timer,
+                      taker_entry=True, taker_exit=True)
+        runs.append((f"   контроль рынок цель {target}/{timer//60}м",
+                     params, random_control(0.004)))
+
     # СОГЛАСОВАННЫЙ КОНТРОЛЬ. Обычного случайного входа мало: цель 8 при стопе
     # 16 — асимметричный барьер, и он даёт высокий винрейт сам по себе, без
     # всякого сигнала. Поэтому к каждой конструкции по потоку идёт двойник с
