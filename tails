@@ -4,8 +4,15 @@
 # Зачем обёртка: в браузерной консоли Hetzner длинная команда переносится по
 # пробелу и рвётся пополам. Здесь переносить нечего.
 #
-# Вывод дублируется в out/tails.txt, откуда его отдаёт страница на 8080.
+# Имя файла с выводом содержит инструмент: этот замер гоняют по инструментам
+# подряд, и общий out/tails.txt затирался следующим запуском — прогон по HYPE
+# так и пропал, пока читали XRP.
 cd "$(dirname "$0")" || exit 1
 mkdir -p out
-venv/bin/python tools/tails.py "$@" 2>&1 | tee "out/tails.txt"
+symbol="all"; prev=""
+for arg in "$@"; do
+    [[ "$prev" == "--symbol" ]] && symbol="$arg"
+    prev="$arg"
+done
+venv/bin/python tools/tails.py "$@" 2>&1 | tee "out/tails_${symbol}.txt"
 exit "${PIPESTATUS[0]}"
