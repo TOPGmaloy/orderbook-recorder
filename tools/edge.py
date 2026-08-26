@@ -193,7 +193,7 @@ def miss_share(g, notional):
     return float((~np.isfinite(both + g[f"sell{notional}"])).mean())
 
 
-def show(symbol, rows, fee, spread_med):
+def show(symbol, rows, fee, spread_med, lag_ms):
     print("\n" + "=" * 100)
     note = " (БЕЗ КОМИССИИ)"
     if fee != 0:
@@ -202,7 +202,8 @@ def show(symbol, rows, fee, spread_med):
                 if lo is not None and hi != lo else "")
     print(f"  {symbol}   тейкер {fee:g} б.п.{note}   "
           f"медианный спред {spread_med:.3f} б.п.   "
-          f"круг по рынку ≈ {2 * fee + spread_med:.3f} б.п.")
+          f"круг по рынку ≈ {2 * fee + spread_med:.3f} б.п.   "
+          f"задержка {lag_ms} мс")
     print("=" * 100)
     print(f"  {'горизонт':<10}{'порог':>7}{'сигналов':>11}{'времени':>9}"
           f"{'блоков':>8}{'валовое':>10}{'ЧИСТОЕ':>10}{'t':>8}{'1-я пол.':>10}"
@@ -298,6 +299,49 @@ def selftest():
     return 0 if ok else 1
 
 
+LAG_SCAN = (200, 600, 1000, 1400)
+
+
+def lag_scan(targets, grids, a):
+    """Как преимущество тает с задержкой — главная проверка на честность.
+
+    Наша картина стакана отстаёт от матчинга примерно на 340 мс: 165 мс идёт
+    поток плюс биржа собирает стакан пачками по 200 мс. Заявка после решения
+    летит на биржу ещё около 145 мс (RTT 291 мс пополам). Значит живой бот
+    исполняется по состоянию рынка примерно на 485 мс ПОЗЖЕ того, что видел, —
+    а замер с задержкой 200 мс исполняет его на 140 мс РАНЬШЕ момента решения.
+    Для конструкции, которая гонится за движением, это смещение в свою пользу
+    ровно там, где движение и происходит.
+
+    Если преимущество держится к 600-1000 мс — оно настоящее. Если тает —
+    мы всё это время меряли фору по времени, а не сигнал.
+    """
+    cells = ((60000, 3.0), (300000, 3.0))
+    print("\n" + "=" * 100)
+    print("  КАК ПРЕИМУЩЕСТВО ТАЕТ С ЗАДЕРЖКОЙ")
+    print("  Честная задержка для этого рынка — около 500 мс, а не 200:")
+    print("  картина отстаёт от матчинга на ~340 мс, заявка летит ещё ~145 мс.")
+    print("=" * 100)
+    for h_ms, th in cells:
+        label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
+        print(f"\n  ЧИСТОЕ, горизонт {label}, порог {th:g}σ")
+        print(f"    {'инструмент':<12}" + "".join(f"{str(L) + ' мс':>12}" for L in LAG_SCAN))
+        for symbol in targets:
+            g = grids.get(symbol)
+            if g is None or len(g["mid"]) < 5000:
+                continue
+            fee = a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
+            line = f"    {symbol:<12}"
+            for lag in LAG_SCAN:
+                scan = argparse.Namespace(**vars(a))
+                scan.lag_ms = lag
+                row = next((r for r in measure(symbol, g, scan, fee)
+                            if r[0] == h_ms and r[1] == th), None)
+                line += f"{row[5]:>12.3f}" if row and np.isfinite(row[5]) else f"{'—':>12}"
+            print(line)
+    print("\n" + "=" * 100)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -314,6 +358,8 @@ def main():
     ap.add_argument("--taker-bp", type=float, default=None,
                     help="комиссия тейкера; по умолчанию берётся с биржи "
                          "поинструментно")
+    ap.add_argument("--lag-scan", action="store_true",
+                    help="показать, как преимущество тает с задержкой решения")
     ap.add_argument("--selftest", action="store_true",
                     help="проверить сам инструмент на выдуманных данных")
     a = ap.parse_args()
@@ -343,7 +389,7 @@ def main():
             continue
         fee = a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
         rows = measure(symbol, g, a, fee)
-        show(symbol, rows, fee, float(np.median(g["spread"])))
+        show(symbol, rows, fee, float(np.median(g["spread"])), a.lag_ms)
         print(f"  цена круга по рынку:  {depth_note(g)}")
         if f"buy{a.notional}" not in g:
             print("  ВНИМАНИЕ: сетка старая, цены исполнения в ней нет — "
@@ -360,6 +406,9 @@ def main():
     print("  ЧТО ПРОШЛО ПРОВЕРКУ")
     print("  Засчитывается только положительное чистое на ОБЕИХ половинах при t > 3.")
     print("=" * 100)
+    if a.lag_scan:
+        lag_scan(targets, grids, a)
+
     if not survivors:
         print("  Ни одна пара «горизонт + порог» не прошла ни на одном инструменте.")
     else:
