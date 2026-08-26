@@ -80,82 +80,96 @@ def t_stat(values):
     return float(values.mean() / (np.std(values, ddof=1) / np.sqrt(len(values))))
 
 
-def measure(symbol, g, a, fee):
-    """Строки таблицы по одному инструменту."""
+def observations(g, a, fee, h_ms, th, sig, buy_bp, sell_bp):
+    """Наблюдения по одной ячейке «горизонт + порог».
+
+    Одно место, где строится сделка: когда вошли, что взяли валом, что
+    осталось после издержек и что дал бы случайный вход в те же моменты.
+    Разбор по половинам и разбор по суткам берут отсюда же — двух реализаций
+    одного расчёта в этом проекте уже хватило.
+    """
     step = a.step_ms
     lag = max(1, a.lag_ms // step)
     mid, seg, ts, spread = g["mid"], g["seg"], g["ts"], g["spread"]
     n = len(mid)
+    h = max(1, h_ms // step)
+    end = n - lag - h
+    if end <= 1000:
+        return None
 
+    # доходность от момента входа (сигнал + задержка) до горизонта;
+    # через разрывы записи не считаем
+    same = seg[lag + h: lag + h + end] == seg[lag: lag + end]
+    fut = np.full(n, np.nan)
+    fut[:end] = np.where(
+        same, (mid[lag + h: lag + h + end] / mid[lag: lag + end] - 1) * 1e4, np.nan)
+
+    # Издержки круга: комиссия обеих сторон плюс НАСТОЯЩАЯ цена входа и выхода
+    # по рынку для выбранного объёма. Спред касания — это цена заявки,
+    # стремящейся к нулю; заявка на реальные деньги идёт по стакану вглубь.
+    # Лонг покупает на входе и продаёт на выходе, шорт наоборот, и книга на
+    # выходе своя — поэтому берутся четыре разных узла, а не удвоенный спред.
+    cost = np.full(n, np.nan)
+    if buy_bp is None:
+        cost[:end] = 2 * fee + (spread[lag: lag + end]
+                                + spread[lag + h: lag + h + end]) / 2
+    else:
+        long_cost = buy_bp[lag: lag + end] + sell_bp[lag + h: lag + h + end]
+        short_cost = sell_bp[lag: lag + end] + buy_bp[lag + h: lag + h + end]
+        cost[:end] = 2 * fee + np.where(sig[:end] > 0, long_cost, short_cost)
+
+    usable = np.isfinite(fut) & np.isfinite(sig) & np.isfinite(cost)
+    mask = usable & (np.abs(sig) >= th)
+    share = mask.sum() / max(usable.sum(), 1) * 100
+    if mask.sum() < 200:
+        return {"when": ts[mask], "share": share, "n": int(mask.sum())}
+    gross = np.sign(sig[mask]) * fut[mask]
+    net = gross - cost[mask]
+    signs = np.random.default_rng(0).choice([-1.0, 1.0], size=int(mask.sum()))
+    return {"when": ts[mask], "gross": gross, "net": net,
+            "ctrl": signs * fut[mask] - cost[mask],
+            "share": share, "n": int(mask.sum()),
+            "block_us": max(1_800_000_000, 4 * h_ms * 1000)}
+
+
+def prepare(g, a):
+    """Сигнал и цена исполнения — то, что не зависит от горизонта и порога."""
+    step = a.step_ms
     raw = rolling(g["delta_raw"], max(1, 5000 // step))     # дельта сделок за 5 с
     scale = rolling_sigma(raw, step)
     with np.errstate(invalid="ignore", divide="ignore"):
         sig = np.where(np.isfinite(scale) & (scale > 0), raw / scale, np.nan)
-
     # цена исполнения выбранного объёма; на старых сетках её нет — тогда
     # считаем по спреду касания, как раньше, и говорим об этом в шапке
-    buy_bp = g.get(f"buy{a.notional}")
-    sell_bp = g.get(f"sell{a.notional}")
+    return sig, g.get(f"buy{a.notional}"), g.get(f"sell{a.notional}")
 
+
+def measure(symbol, g, a, fee, prep=None):
+    """Строки таблицы по одному инструменту."""
+    sig, buy_bp, sell_bp = prep if prep is not None else prepare(g, a)
+    empty = (float("nan"),) * 6
     rows = []
     for h_ms in HORIZONS_MS:
-        h = max(1, h_ms // step)
-        end = n - lag - h
-        if end <= 1000:
-            continue
-        # доходность от момента входа (сигнал + задержка) до горизонта;
-        # через разрывы записи не считаем
-        same = seg[lag + h: lag + h + end] == seg[lag: lag + end]
-        fut = np.full(n, np.nan)
-        fut[:end] = np.where(
-            same, (mid[lag + h: lag + h + end] / mid[lag: lag + end] - 1) * 1e4, np.nan)
-        # Издержки круга: комиссия обеих сторон плюс НАСТОЯЩАЯ цена входа и
-        # выхода по рынку для выбранного объёма. Спред касания — это цена
-        # заявки, стремящейся к нулю; заявка на реальные деньги идёт по
-        # стакану вглубь. Лонг покупает на входе и продаёт на выходе, шорт
-        # наоборот, и книга на выходе своя — поэтому берутся четыре разных
-        # узла, а не удвоенный спред.
-        cost = np.full(n, np.nan)
-        if buy_bp is None:
-            cost[:end] = 2 * fee + (spread[lag: lag + end]
-                                    + spread[lag + h: lag + h + end]) / 2
-        else:
-            long_cost = buy_bp[lag: lag + end] + sell_bp[lag + h: lag + h + end]
-            short_cost = sell_bp[lag: lag + end] + buy_bp[lag + h: lag + h + end]
-            cost[:end] = 2 * fee + np.where(sig[:end] > 0, long_cost, short_cost)
-
-        block_us = max(1_800_000_000, 4 * h_ms * 1000)
-        rng = np.random.default_rng(0)
         for th in THRESHOLDS:
-            usable = np.isfinite(fut) & np.isfinite(sig)
-            mask = usable & (np.abs(sig) >= th)
-            share = mask.sum() / max(usable.sum(), 1) * 100
-            if mask.sum() < 200:
-                rows.append((h_ms, th, int(mask.sum()), 0,
-                             float("nan"), float("nan"), float("nan"),
-                             float("nan"), float("nan"), float("nan"), share))
+            o = observations(g, a, fee, h_ms, th, sig, buy_bp, sell_bp)
+            if o is None:
                 continue
-            gross = np.sign(sig[mask]) * fut[mask]
-            net = gross - cost[mask]
-            signs = rng.choice([-1.0, 1.0], size=int(mask.sum()))
-            ctrl = signs * fut[mask] - cost[mask]
-
-            when = ts[mask]
-            ids, net_b = block_means(when, net, ts[0], block_us)
-            _, gross_b = block_means(when, gross, ts[0], block_us)
-            _, ctrl_b = block_means(when, ctrl, ts[0], block_us)
+            if "net" not in o:
+                rows.append((h_ms, th, o["n"], 0) + empty[:6] + (o["share"],))
+                continue
+            ids, net_b = block_means(o["when"], o["net"], g["ts"][0], o["block_us"])
+            _, gross_b = block_means(o["when"], o["gross"], g["ts"][0], o["block_us"])
+            _, ctrl_b = block_means(o["when"], o["ctrl"], g["ts"][0], o["block_us"])
             if len(net_b) < MIN_BLOCKS:
-                rows.append((h_ms, th, int(mask.sum()), len(net_b),
-                             float("nan"), float("nan"), float("nan"),
-                             float("nan"), float("nan"), float("nan"), share))
+                rows.append((h_ms, th, o["n"], len(net_b)) + empty[:6] + (o["share"],))
                 continue
             middle = (ids[0] + ids[-1]) / 2
             first, second = ids <= middle, ids > middle
-            rows.append((h_ms, th, int(mask.sum()), len(net_b),
+            rows.append((h_ms, th, o["n"], len(net_b),
                          float(gross_b.mean()), float(net_b.mean()), t_stat(net_b),
                          float(net_b[first].mean()) if first.any() else float("nan"),
                          float(net_b[second].mean()) if second.any() else float("nan"),
-                         float(ctrl_b.mean()), share))
+                         float(ctrl_b.mean()), o["share"]))
     return rows
 
 
@@ -302,6 +316,50 @@ def selftest():
 LAG_SCAN = (200, 600, 1000, 1400)
 
 
+def by_day(targets, grids, a):
+    """Каждые сутки записи отдельно.
+
+    Две половины — слабая проверка: одна сильная сессия внутри половины тянет
+    её целиком. Если преимущество держится на КАЖДЫХ сутках, это свойство
+    рынка; если живёт одним днём, это была одна удачная волна, и знать об этом
+    надо сейчас, а не после запуска.
+    """
+    cells = ((60000, 3.0), (300000, 3.0))
+    print("\n" + "=" * 100)
+    print("  ПО СУТКАМ ЗАПИСИ")
+    print("  Одна удачная сессия внутри половины вытягивает половину целиком.")
+    print("  Здесь видно, держится ли преимущество каждый день.")
+    print("=" * 100)
+    for h_ms, th in cells:
+        label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
+        print(f"\n  ЧИСТОЕ по суткам, горизонт {label}, порог {th:g}σ")
+        header_done = False
+        for symbol in targets:
+            g = grids.get(symbol)
+            if g is None or len(g["mid"]) < 5000:
+                continue
+            fee = a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
+            o = observations(g, a, fee, h_ms, th, *prepare(g, a))
+            if not o or "net" not in o:
+                continue
+            ids, net_b = block_means(o["when"], o["net"], g["ts"][0], o["block_us"])
+            days = (ids * o["block_us"]) // 86_400_000_000
+            unique = np.unique(days)
+            if not header_done:
+                print(f"    {'инструмент':<12}"
+                      + "".join(f"{'сутки ' + str(int(d) + 1):>12}" for d in unique)
+                      + f"{'блоков/сут':>12}")
+                header_done = True
+            line = f"    {symbol:<12}"
+            counts = []
+            for d in unique:
+                sel = days == d
+                counts.append(int(sel.sum()))
+                line += f"{net_b[sel].mean():>12.3f}" if sel.sum() >= 4 else f"{'—':>12}"
+            print(line + f"{int(np.median(counts)):>12}")
+    print("\n" + "=" * 100)
+
+
 def lag_scan(targets, grids, a):
     """Как преимущество тает с задержкой — главная проверка на честность.
 
@@ -358,6 +416,8 @@ def main():
     ap.add_argument("--taker-bp", type=float, default=None,
                     help="комиссия тейкера; по умолчанию берётся с биржи "
                          "поинструментно")
+    ap.add_argument("--by-day", action="store_true",
+                    help="разложить чистое по суткам записи")
     ap.add_argument("--lag-scan", action="store_true",
                     help="показать, как преимущество тает с задержкой решения")
     ap.add_argument("--selftest", action="store_true",
@@ -406,6 +466,8 @@ def main():
     print("  ЧТО ПРОШЛО ПРОВЕРКУ")
     print("  Засчитывается только положительное чистое на ОБЕИХ половинах при t > 3.")
     print("=" * 100)
+    if a.by_day:
+        by_day(targets, grids, a)
     if a.lag_scan:
         lag_scan(targets, grids, a)
 
