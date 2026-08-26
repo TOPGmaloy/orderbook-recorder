@@ -100,6 +100,8 @@ def main():
     ap.add_argument("--lag-ms", type=int, default=200)
     ap.add_argument("--taker-bp", type=float, default=1.0)
     ap.add_argument("--notional", type=float, default=2500)
+    ap.add_argument("--compare-order", action="store_true",
+                    help="прогнать оба порядка времени и сравнить (одна команда)")
     ap.add_argument("--exch-time", action="store_true",
                     help="проигрывать в порядке биржевого времени, а не получения")
     ap.add_argument("--full", action="store_true",
@@ -108,6 +110,9 @@ def main():
                     help="показать, где уходит время (берите с --hours 2)")
     a = ap.parse_args()
 
+    if getattr(a, "compare_order", False):
+        compare_orders(a)
+        return
     if a.profile:
         import cProfile, pstats, io as _io
         a.profile = False
@@ -153,6 +158,69 @@ def main_body(a):
         print("  исполнения. Чем шире спред в б.п., тем больше можно заработать —")
         print("  на BTC спред 0.013 б.п. и зарабатывать там нечего в принципе.")
         print("=" * 96)
+
+
+def compare_orders(a):
+    """Два прогона — по времени получения и по биржевому — и сравнение.
+
+    Различаем ровно одно: врёт ли модель исполнения или книга с лентой
+    разъехались во времени. Если доля невозможных исполнений при биржевом
+    порядке падает — причина была в рассинхронизации, и результат в силе.
+    Если не падает — наливаются заявки там, где рынка не было.
+    """
+    from config import SYMBOLS
+    targets = SYMBOLS if a.symbol == "all" else [a.symbol]
+    collected = {}
+    for mode, label in (("local", "по получению"), ("exch", "по бирже")):
+        a.exch_time = (mode == "exch")
+        base, runs = build_runs(a)
+        results = replay_all(targets, base, {s: runs for s in targets})
+        rows = {}
+        for sym in targets:
+            res = results.get(sym)
+            if not res:
+                continue
+            res.pop("__spread__", None)
+            res.pop("__path__", None)
+            bad = res.pop("__impossible__", {})
+            res.pop("__samples__", None)
+            best, best_name = None, None
+            for name in res:
+                if not name.startswith("поток"):
+                    continue
+                trades = res[name][0]
+                if len(trades) < 20:
+                    continue
+                import numpy as np
+                mean = float(np.mean([t.pnl_bp for t in trades]))
+                if best is None or mean > best:
+                    best, best_name = mean, name
+            if best_name:
+                trades = res[best_name][0]
+                rows[sym] = {"n": len(trades), "mean": best,
+                             "bad": bad.get(best_name, 0), "name": best_name}
+        collected[mode] = rows
+        print(f"  прогон {label}: готово", flush=True)
+
+    print("\n" + "=" * 92)
+    print("  СРАВНЕНИЕ ПОРЯДКА ВРЕМЕНИ")
+    print("  Если доля невозможных исполнений падает при биржевом порядке —")
+    print("  причина была в рассинхронизации ленты и стакана, а не в модели.")
+    print("=" * 92)
+    print(f"  {'инструмент':<13}{'сделок':>8}{'по получению':>26}{'по бирже':>26}")
+    print(f"  {'':<13}{'':>8}{'б.п.':>12}{'невозм.':>14}{'б.п.':>12}{'невозм.':>14}")
+    for sym in targets:
+        L = collected.get("local", {}).get(sym)
+        E = collected.get("exch", {}).get(sym)
+        if not L and not E:
+            continue
+        def cell(x):
+            if not x:
+                return f"{'—':>12}{'—':>14}"
+            share = x["bad"] / max(x["n"], 1) * 100
+            return f"{x['mean']:>12.2f}{share:>13.0f}%"
+        print(f"  {sym:<13}{(L or E)['n']:>8}{cell(L)}{cell(E)}")
+    print("=" * 92)
 
 
 def build_runs(a):
