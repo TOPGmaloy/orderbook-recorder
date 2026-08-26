@@ -332,8 +332,10 @@ def by_day(targets, grids, a):
     print("=" * 100)
     for h_ms, th in cells:
         label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
-        print(f"\n  ЧИСТОЕ по суткам, горизонт {label}, порог {th:g}σ")
-        header_done = False
+        # Сутки сперва собираются по ВСЕМ инструментам, и только потом
+        # печатается шапка: у инструментов, добавленных позже, дней меньше, и
+        # при шапке от первого их числа съезжали в чужие столбцы.
+        table = {}
         for symbol in targets:
             g = grids.get(symbol)
             if g is None or len(g["mid"]) < 5000:
@@ -344,59 +346,22 @@ def by_day(targets, grids, a):
                 continue
             ids, net_b = block_means(o["when"], o["net"], g["ts"][0], o["block_us"])
             days = (ids * o["block_us"]) // 86_400_000_000
-            unique = np.unique(days)
-            if not header_done:
-                print(f"    {'инструмент':<12}"
-                      + "".join(f"{'сутки ' + str(int(d) + 1):>12}" for d in unique)
-                      + f"{'блоков/сут':>12}")
-                header_done = True
+            table[symbol] = {int(d): net_b[days == d] for d in np.unique(days)}
+        if not table:
+            continue
+        all_days = sorted({d for row in table.values() for d in row})
+        print(f"\n  ЧИСТОЕ по суткам, горизонт {label}, порог {th:g}σ")
+        print(f"    {'инструмент':<12}"
+              + "".join(f"{'сутки ' + str(d + 1):>12}" for d in all_days)
+              + f"{'блоков/сут':>12}")
+        for symbol, row in table.items():
             line = f"    {symbol:<12}"
-            counts = []
-            for d in unique:
-                sel = days == d
-                counts.append(int(sel.sum()))
-                line += f"{net_b[sel].mean():>12.3f}" if sel.sum() >= 4 else f"{'—':>12}"
+            for d in all_days:
+                values = row.get(d)
+                line += (f"{values.mean():>12.3f}"
+                         if values is not None and len(values) >= 4 else f"{'—':>12}")
+            counts = [len(v) for v in row.values()]
             print(line + f"{int(np.median(counts)):>12}")
-    print("\n" + "=" * 100)
-
-
-def lag_scan(targets, grids, a):
-    """Как преимущество тает с задержкой — главная проверка на честность.
-
-    Наша картина стакана отстаёт от матчинга примерно на 340 мс: 165 мс идёт
-    поток плюс биржа собирает стакан пачками по 200 мс. Заявка после решения
-    летит на биржу ещё около 145 мс (RTT 291 мс пополам). Значит живой бот
-    исполняется по состоянию рынка примерно на 485 мс ПОЗЖЕ того, что видел, —
-    а замер с задержкой 200 мс исполняет его на 140 мс РАНЬШЕ момента решения.
-    Для конструкции, которая гонится за движением, это смещение в свою пользу
-    ровно там, где движение и происходит.
-
-    Если преимущество держится к 600-1000 мс — оно настоящее. Если тает —
-    мы всё это время меряли фору по времени, а не сигнал.
-    """
-    cells = ((60000, 3.0), (300000, 3.0))
-    print("\n" + "=" * 100)
-    print("  КАК ПРЕИМУЩЕСТВО ТАЕТ С ЗАДЕРЖКОЙ")
-    print("  Честная задержка для этого рынка — около 500 мс, а не 200:")
-    print("  картина отстаёт от матчинга на ~340 мс, заявка летит ещё ~145 мс.")
-    print("=" * 100)
-    for h_ms, th in cells:
-        label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
-        print(f"\n  ЧИСТОЕ, горизонт {label}, порог {th:g}σ")
-        print(f"    {'инструмент':<12}" + "".join(f"{str(L) + ' мс':>12}" for L in LAG_SCAN))
-        for symbol in targets:
-            g = grids.get(symbol)
-            if g is None or len(g["mid"]) < 5000:
-                continue
-            fee = a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
-            line = f"    {symbol:<12}"
-            for lag in LAG_SCAN:
-                scan = argparse.Namespace(**vars(a))
-                scan.lag_ms = lag
-                row = next((r for r in measure(symbol, g, scan, fee)
-                            if r[0] == h_ms and r[1] == th), None)
-                line += f"{row[5]:>12.3f}" if row and np.isfinite(row[5]) else f"{'—':>12}"
-            print(line)
     print("\n" + "=" * 100)
 
 
