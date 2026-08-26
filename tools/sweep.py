@@ -303,6 +303,30 @@ def build_runs(a, taker_bp):
                       delta_th=delta_th, taker_entry=True, taker_exit=True)
         runs.append((f"ТОЛЬКО РЫНОК {delta_th:g}с/цель {target}/{timer//60}м",
                      params, delta_strategy(params)))
+    # БЕЗ БАРЬЕРОВ: вход по рынку, выход по рынку строго по таймеру. Ни стопа,
+    # ни цели.
+    #
+    # Это перекрёстная проверка к tools/edge.py, который меряет ровно такую
+    # сделку, но другим способом — по всем узлам сетки сразу, а не по сделкам
+    # свободного движка. Там на HYPE вышло +2.68 б.п. на горизонте 5 минут при
+    # пороге 3 сигмы. Здесь то же самое считает второй, независимо написанный
+    # движок: с очередью, задержкой в 200 мс и реальными ценами касания вместо
+    # середины. Сойдутся — находке можно верить. Разойдутся — один из двух
+    # инструментов врёт, и надо искать который.
+    #
+    # Барьеры убраны намеренно: стоп 16 и цель 8 срезают распределение и
+    # меняют измеряемую величину. Прежние прогоны sweep поэтому и не
+    # сопоставимы с edge — там ещё и сигма была замороженной.
+    for delta_th, timer in ((2.0, 60), (3.0, 60), (2.0, 300), (3.0, 300)):
+        params = dict(base, stop_bp=999, target_bp=999, time_stop_s=timer,
+                      delta_th=delta_th, taker_entry=True, taker_exit=True)
+        runs.append((f"БЕЗ БАРЬЕРОВ {delta_th:g}σ/{timer//60} мин",
+                     params, delta_strategy(params)))
+    for timer in (60, 300):
+        params = dict(base, stop_bp=999, target_bp=999, time_stop_s=timer,
+                      taker_entry=True, taker_exit=True)
+        runs.append((f"   контроль без барьеров {timer//60} мин",
+                     params, random_control(0.004)))
     for delta_th, target, stop, timer in ((3.0, 8, 16, 300), (4.0, 20, 30, 900)):
         params = dict(base, stop_bp=stop, target_bp=target, time_stop_s=timer,
                       taker_entry=True, taker_exit=True)

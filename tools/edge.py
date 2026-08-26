@@ -35,6 +35,11 @@ t = 3, нужно от 700 до 8000 сделок на половину запи
 
   ПОЛОВИНЫ. Всё считается ещё и по половинам записи отдельно. Знак обязан
   совпасть — иначе это не преимущество, а период.
+
+Столбец «времени» — доля узлов, где сигнал горит. Без неё матожидание на
+сигнал не переводится в расписание сделок: сигналы идут пачками, а позицию
+можно держать одну, и число сделок в сутки упирается не в число сигналов, а в
+горизонт удержания.
 """
 
 import argparse
@@ -107,11 +112,13 @@ def measure(symbol, g, a, fee):
         block_us = max(1_800_000_000, 4 * h_ms * 1000)
         rng = np.random.default_rng(0)
         for th in THRESHOLDS:
-            mask = np.isfinite(fut) & np.isfinite(sig) & (np.abs(sig) >= th)
+            usable = np.isfinite(fut) & np.isfinite(sig)
+            mask = usable & (np.abs(sig) >= th)
+            share = mask.sum() / max(usable.sum(), 1) * 100
             if mask.sum() < 200:
                 rows.append((h_ms, th, int(mask.sum()), 0,
                              float("nan"), float("nan"), float("nan"),
-                             float("nan"), float("nan"), float("nan")))
+                             float("nan"), float("nan"), float("nan"), share))
                 continue
             gross = np.sign(sig[mask]) * fut[mask]
             net = gross - cost[mask]
@@ -125,7 +132,7 @@ def measure(symbol, g, a, fee):
             if len(net_b) < MIN_BLOCKS:
                 rows.append((h_ms, th, int(mask.sum()), len(net_b),
                              float("nan"), float("nan"), float("nan"),
-                             float("nan"), float("nan"), float("nan")))
+                             float("nan"), float("nan"), float("nan"), share))
                 continue
             middle = (ids[0] + ids[-1]) / 2
             first, second = ids <= middle, ids > middle
@@ -133,7 +140,7 @@ def measure(symbol, g, a, fee):
                          float(gross_b.mean()), float(net_b.mean()), t_stat(net_b),
                          float(net_b[first].mean()) if first.any() else float("nan"),
                          float(net_b[second].mean()) if second.any() else float("nan"),
-                         float(ctrl_b.mean())))
+                         float(ctrl_b.mean()), share))
     return rows
 
 
@@ -148,18 +155,18 @@ def show(symbol, rows, fee, spread_med):
           f"медианный спред {spread_med:.3f} б.п.   "
           f"круг по рынку ≈ {2 * fee + spread_med:.3f} б.п.")
     print("=" * 100)
-    print(f"  {'горизонт':<10}{'порог':>7}{'сигналов':>11}{'блоков':>8}"
-          f"{'валовое':>10}{'ЧИСТОЕ':>10}{'t':>8}{'1-я пол.':>10}"
+    print(f"  {'горизонт':<10}{'порог':>7}{'сигналов':>11}{'времени':>9}"
+          f"{'блоков':>8}{'валовое':>10}{'ЧИСТОЕ':>10}{'t':>8}{'1-я пол.':>10}"
           f"{'2-я пол.':>10}{'контроль':>10}")
-    print("  " + "-" * 96)
-    for h_ms, th, n_sig, n_blk, gross, net, t, first, second, ctrl in rows:
+    print("  " + "-" * 105)
+    for h_ms, th, n_sig, n_blk, gross, net, t, first, second, ctrl, share in rows:
         label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
         if not np.isfinite(net):
-            print(f"  {label:<10}{th:>6.0f}σ{n_sig:>11,}{n_blk:>8}"
+            print(f"  {label:<10}{th:>6.0f}σ{n_sig:>11,}{share:>8.1f}%{n_blk:>8}"
                   f"{'мало данных':>48}")
             continue
         star = " <" if (net > 0 and first > 0 and second > 0 and t > 3) else ""
-        print(f"  {label:<10}{th:>6.0f}σ{n_sig:>11,}{n_blk:>8}"
+        print(f"  {label:<10}{th:>6.0f}σ{n_sig:>11,}{share:>8.1f}%{n_blk:>8}"
               f"{gross:>10.3f}{net:>10.3f}{t:>8.2f}{first:>10.3f}"
               f"{second:>10.3f}{ctrl:>10.3f}{star}")
 
@@ -209,7 +216,7 @@ def selftest():
              "delta_raw": np.repeat(value, h)[:n]}
         row = next(r for r in measure("ТЕСТ", g, args, fee)
                    if r[0] == h_ms and r[1] == 2.0)
-        _, _, n_sig, n_blk, gross, net, t, first, second, ctrl = row
+        _, _, n_sig, n_blk, gross, net, t, first, second, ctrl, _ = row
         print(f"\n  {name}: сигналов {n_sig:,}, блоков {n_blk}, "
               f"валовое {gross:.2f}, чистое {net:.2f}, t {t:.2f}, "
               f"контроль {ctrl:.2f}")
@@ -279,7 +286,7 @@ def main():
         fee = a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
         rows = measure(symbol, g, a, fee)
         show(symbol, rows, fee, float(np.median(g["spread"])))
-        for h_ms, th, _, _, _, net, t, first, second, ctrl in rows:
+        for h_ms, th, _, _, _, net, t, first, second, ctrl, _ in rows:
             if np.isfinite(net) and net > 0 and first > 0 and second > 0 and t > 3:
                 survivors.setdefault((h_ms, th), []).append(symbol)
 
