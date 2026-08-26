@@ -44,6 +44,13 @@ HORIZONS_MS = [1000, 5000, 30000, 60000, 300000, 900000, 1800000]
 CACHE_DIR = Path(__file__).resolve().parents[1] / "cache"
 
 
+# Версия сборщика сетки. Кэш ключуется отпечатком ДАННЫХ, и без этого номера
+# сетка, посчитанная прежним кодом, молча подхватывалась новым. Так и вышло:
+# одиночный и многоинструментный сборщики писали в одно имя и давали на одном
+# куске 16732 узла против 19142. Меняешь смысл сетки — поднимай номер.
+GRID_VERSION = 2
+
+
 def _cache_key(symbol, step_ms, hours):
     """Отпечаток данных: имена и размеры файлов. Дописался новый файл —
     отпечаток изменился, кэш пересчитается сам."""
@@ -51,36 +58,19 @@ def _cache_key(symbol, step_ms, hours):
     files = closed_files(hours, quiet=True)
     mark = "|".join(f"{f.name}:{f.stat().st_size}" for f in files)
     digest = hashlib.sha1(mark.encode()).hexdigest()[:16]
-    return CACHE_DIR / f"grid_{symbol}_{step_ms}_{digest}.npz"
+    return CACHE_DIR / f"grid_{symbol}_{step_ms}_v{GRID_VERSION}_{digest}.npz"
 
 
 def grid(symbol, step_ms, hours=None, use_cache=True):
-    """Сетка времени с книгой. Результат кэшируется.
+    """Сетка времени с книгой для одного инструмента.
 
-    Пересборка книги по всей записи — самая дорогая операция в проекте:
-    распаковка сотен файлов и разбор миллионов сообщений. Для одного прогона
-    это минуты, а прогон по шести инструментам читает те же файлы шесть раз.
-    Сама сетка при этом крошечная — несколько чисел на узел, десятки мегабайт.
-    Поэтому считаем один раз и складываем рядом.
+    Своей сборки здесь больше нет — ровно затем, что их было две. Одиночная и
+    многоинструментная расходились в обработке простоев записи и на одном
+    куске давали 16732 узла против 19142, а писали в один файл кэша: результат
+    зависел от того, какой инструмент запускали раньше. Осталась та, на
+    которой считались все выводы по инструментам сразу.
     """
-    if use_cache:
-        path = _cache_key(symbol, step_ms, hours)
-        if path.exists():
-            try:
-                data = np.load(path)
-                return {k: data[k] for k in data.files}
-            except Exception:
-                path.unlink(missing_ok=True)
-        result = _grid_build(symbol, step_ms, hours)
-        try:
-            CACHE_DIR.mkdir(exist_ok=True)
-            for old in CACHE_DIR.glob(f"grid_{symbol}_{step_ms}_*.npz"):
-                old.unlink()          # устаревшие отпечатки не копим
-            np.savez_compressed(path, **result)
-        except Exception:
-            pass
-        return result
-    return _grid_build(symbol, step_ms, hours)
+    return build_grids([symbol], step_ms, hours, use_cache)[symbol]
 
 
 def build_grids(symbols, step_ms, hours=None, use_cache=True):
@@ -108,7 +98,8 @@ def build_grids(symbols, step_ms, hours=None, use_cache=True):
 
     print(f"  собираю сетки: {', '.join(need)}", flush=True)
     built = _grid_build_many(need, step_ms, hours)
-    for sym, result in built.items():
+    for sym in list(built):
+        result = built.pop(sym)          # не держим две копии сетки разом
         out[sym] = result
         if use_cache:
             try:
@@ -119,6 +110,43 @@ def build_grids(symbols, step_ms, hours=None, use_cache=True):
             except Exception:
                 pass
     return out
+
+
+class _Column:
+    """Растущий numpy-буфер вместо списка Python.
+
+    Список из полутора миллионов чисел — это ~50 МБ на колонку: десять колонок
+    на восьми инструментах дают 4 ГБ, ровно всю память сервера. Прогон по всей
+    записи на этом и встал: последний файл читался нормально, а сборка уходила
+    в своп. Здесь то же самое занимает в восемь раз меньше.
+
+    Точность: цена остаётся float64 — на BTC спред 0.013 б.п., и терять на нём
+    знаки нельзя. Всё остальное уже приведено к базисным пунктам или к долям,
+    и float32 там даёт запас в тысячу раз против измеряемых величин.
+    """
+
+    __slots__ = ("buf", "n")
+
+    def __init__(self, dtype, capacity=4096):
+        self.buf = np.empty(capacity, dtype=dtype)
+        self.n = 0
+
+    def append(self, value):
+        if self.n == len(self.buf):
+            bigger = np.empty(len(self.buf) * 2, dtype=self.buf.dtype)
+            bigger[:self.n] = self.buf[:self.n]
+            self.buf = bigger
+        self.buf[self.n] = value
+        self.n += 1
+
+    def array(self):
+        return self.buf[:self.n].copy()
+
+
+_COLUMN_TYPES = {"ts": np.int64, "seg": np.int32, "mid": np.float64,
+                 "spread": np.float32, "imb1": np.float32, "imb5": np.float32,
+                 "imb10": np.float32, "micro": np.float32,
+                 "ofi_raw": np.float32, "delta_raw": np.float32}
 
 
 class _GridState:
@@ -136,9 +164,7 @@ class _GridState:
         self.step_us = step_ms * 1000
         self.next_ts = None
         self.segment = 0
-        self.cols = {k: [] for k in ("ts", "seg", "mid", "spread", "imb1",
-                                     "imb5", "imb10", "micro", "ofi_raw",
-                                     "delta_raw")}
+        self.cols = {k: _Column(t) for k, t in _COLUMN_TYPES.items()}
         self.ofi = self.buy = self.sell = 0.0
         self.prev_bid = self.prev_ask = None
 
@@ -212,17 +238,7 @@ class _GridState:
             self.prev_bid = self.prev_ask = None
 
     def finish(self):
-        c = self.cols
-        return {
-            "ts": np.array(c["ts"], dtype=np.int64),
-            "seg": np.array(c["seg"], dtype=np.int32),
-            "mid": np.array(c["mid"]),
-            "spread": np.array(c["spread"]),
-            "imb1": np.array(c["imb1"]), "imb5": np.array(c["imb5"]),
-            "imb10": np.array(c["imb10"]), "micro": np.array(c["micro"]),
-            "ofi_raw": np.array(c["ofi_raw"]),
-            "delta_raw": np.array(c["delta_raw"]),
-        }
+        return {k: col.array() for k, col in self.cols.items()}
 
 
 def _grid_build_many(symbols, step_ms, hours=None):
@@ -231,7 +247,10 @@ def _grid_build_many(symbols, step_ms, hours=None):
     states = {sym: _GridState(sym, step_ms) for sym in symbols}
     holes = downtime(hours)
     hole_i = 0
-    for r in stream(hours=hours, progress=True):
+    # когда инструмент один, отсеиваем его прямо в parquet: иначе все строки
+    # чужих инструментов превращаются в объекты Python впустую
+    only = symbols[0] if len(symbols) == 1 else None
+    for r in stream(symbol=only, hours=hours, progress=True):
         ts = r["ts_local_us"]
         while hole_i < len(holes) and holes[hole_i][1] <= ts:
             for st in states.values():
@@ -243,120 +262,14 @@ def _grid_build_many(symbols, step_ms, hours=None):
     return {sym: st.finish() for sym, st in states.items()}
 
 
-def _grid_build(symbol, step_ms, hours=None):
-    """Прогон записи: книга на сетке времени + поток сделок и OFI между узлами."""
-    book = OrderBook(symbol)
-    step_us = step_ms * 1000
-    next_ts = None
-    segment = 0                 # номер непрерывного куска записи
-    holes = downtime(hours)     # когда диктофон реально стоял
-    hole_index = 0
-
-    ts, seg, mid, spread = [], [], [], []
-    imb1, imb5, imb10 = [], [], []
-    micro = []
-    ofi_bucket, delta_bucket = [], []
-    ofi_acc, buy_acc, sell_acc = 0.0, 0.0, 0.0
-    prev_bid = prev_ask = None          # (цена, объём) для расчёта OFI
-
-    import heapq
-
-    def tops(side, n, best_first_high):
-        """Сумма объёма на n лучших уровнях. nlargest вместо полной сортировки:
-        в книге больше тысячи уровней, а сортировать её на каждом узле сетки
-        при часах записи — это минуты впустую."""
-        picker = heapq.nlargest if best_first_high else heapq.nsmallest
-        return sum(side[p] for p in picker(n, side))
-
-    def emit():
-        nonlocal ofi_acc, buy_acc, sell_acc
-        b, a = book.best()
-        if not b or not a or b[0] >= a[0]:
-            return False
-        m = (b[0] + a[0]) / 2
-        ts.append(next_ts); seg.append(segment); mid.append(m)
-        spread.append((a[0] - b[0]) / m * 1e4)
-        qb, qa = b[1], a[1]
-        imb1.append((qb - qa) / (qb + qa) if qb + qa else 0.0)
-        for n, out in ((5, imb5), (10, imb10)):
-            sb, sa = tops(book.bids, n, True), tops(book.asks, n, False)
-            out.append((sb - sa) / (sb + sa) if sb + sa else 0.0)
-        micro.append(((b[0] * qa + a[0] * qb) / (qa + qb) - m) / m * 1e4)
-        ofi_bucket.append(ofi_acc)
-        delta_bucket.append(buy_acc - sell_acc)
-        ofi_acc = 0.0; buy_acc = 0.0; sell_acc = 0.0
-        return True
-
-    for r in stream(symbol=symbol, hours=hours):
-        # Простой записи: только он рвёт непрерывность. Тишина по инструменту
-        # разрывом не считается — книга в это время просто не менялась, и
-        # кадры с неизменной ценой это честное наблюдение, а не пропуск.
-        while hole_index < len(holes) and next_ts is not None \
-                and holes[hole_index][1] <= r["ts_local_us"]:
-            if next_ts >= holes[hole_index][0]:
-                segment += 1
-                next_ts = holes[hole_index][1]
-                book.reset()
-                prev_bid = prev_ask = None
-            hole_index += 1
-        while next_ts is not None and r["ts_local_us"] >= next_ts + step_us:
-            emit()
-            next_ts += step_us
-        payload = json.loads(r["payload"])
-        if r["channel"] == "snapshot":
-            book.apply_snapshot(payload)
-            if next_ts is None and book.ready:
-                next_ts = r["ts_local_us"]
-                prev_bid = prev_ask = None
-        elif r["channel"] == "depth":
-            if book.apply_delta(payload) == "ok":
-                b, a = book.best()
-                if b and a:
-                    # OFI по Cont-Kukanov-Stoikov: считается по изменениям
-                    # лучших котировок, а не по их уровню
-                    if prev_bid is not None:
-                        if b[0] > prev_bid[0]:
-                            ofi_acc += b[1]
-                        elif b[0] == prev_bid[0]:
-                            ofi_acc += b[1] - prev_bid[1]
-                        else:
-                            ofi_acc -= prev_bid[1]
-                        if a[0] < prev_ask[0]:
-                            ofi_acc -= a[1]
-                        elif a[0] == prev_ask[0]:
-                            ofi_acc -= a[1] - prev_ask[1]
-                        else:
-                            ofi_acc += prev_ask[1]
-                    prev_bid, prev_ask = b, a
-        elif r["channel"] == "deal":
-            for deal in (payload if isinstance(payload, list) else [payload]):
-                try:
-                    v = float(deal["v"])
-                    if int(deal["T"]) == 1:
-                        buy_acc += v
-                    else:
-                        sell_acc += v
-                except (KeyError, TypeError, ValueError):
-                    continue
-        elif r["channel"] == "gap":
-            book.ready = False
-            prev_bid = prev_ask = None
-
-    return {
-        "ts": np.array(ts, dtype=np.int64),
-        "seg": np.array(seg, dtype=np.int32),
-        "mid": np.array(mid),
-        "spread": np.array(spread),
-        "imb1": np.array(imb1), "imb5": np.array(imb5), "imb10": np.array(imb10),
-        "micro": np.array(micro),
-        "ofi_raw": np.array(ofi_bucket),
-        "delta_raw": np.array(delta_bucket),
-    }
-
-
 def rolling(x, k):
-    """Скользящая сумма по k узлам, только по прошлому."""
-    c = np.concatenate([[0.0], np.cumsum(x)])
+    """Скользящая сумма по k узлам, только по прошлому.
+
+    Накопление ведётся в float64 намеренно: колонки хранятся в float32 ради
+    памяти, а нарастающая сумма по полутора миллионам узлов в float32
+    набирает заметную ошибку — и она вылезла бы как ложный сигнал.
+    """
+    c = np.concatenate([[0.0], np.cumsum(x, dtype=np.float64)])
     out = np.full(len(x), np.nan)
     out[k - 1:] = c[k:] - c[:-k]
     return out
