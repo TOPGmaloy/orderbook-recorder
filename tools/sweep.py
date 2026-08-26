@@ -7,11 +7,15 @@
 одном куске результат не переносится на следующий, это уже проверялось на
 моментум-стратегиях. Здесь проверяется другое — структурный вопрос.
 
-Арифметика такая: измеренное преимущество около 0.35 б.п. на сделку, а любой
-выход по рынку стоит 1.0 б.п. Значит конструкция, где заметная доля выходов
-рыночные, убыточна независимо от качества сигнала. Вопрос: бывает ли
-конструкция, где выходы преимущественно лимитные и при этом сделки вообще
-случаются.
+Арифметика такая: измеренное преимущество около 0.35 б.п. на сделку, а выход
+по рынку стоит комиссию плюс переход через спред. Комиссия берётся с биржи
+ПОИНСТРУМЕНТНО и у половины нашей выборки равна нулю (SOL, HYPE, XRP, PEPE,
+ZEC), а у BTC доходит до 4 б.п. Плоская единица на всех, стоявшая здесь
+раньше, была неверна в обе стороны сразу и на нулевых инструментах списывала
+2 б.п. за круг из ничего.
+
+Поэтому смысл столбца «доля лимитных выходов» разный: там, где комиссии нет,
+рыночный выход стоит один спред, и пассивность перестаёт быть обязательной.
 
 Поэтому в таблице главный столбец — не прибыль, а ДОЛЯ ЛИМИТНЫХ ВЫХОДОВ.
 Прибыль без неё смысла не имеет.
@@ -31,7 +35,7 @@ import numpy as np
 
 from tools.backtest import (replay_multi, replay_all, strategy,
                             reversal_strategy, delta_strategy,
-                            random_control)
+                            random_control, taker_fee_bp)
 
 # Конструкции выбраны из измеренной динамики, а не перебором:
 # медиана движения за 60 с — 2.155 б.п., поэтому стоп в 2 б.п. стоит внутри
@@ -98,7 +102,9 @@ def main():
                     help="инструмент или all — пройти по всем записываемым")
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--lag-ms", type=int, default=200)
-    ap.add_argument("--taker-bp", type=float, default=1.0)
+    ap.add_argument("--taker-bp", type=float, default=None,
+                    help="комиссия тейкера; по умолчанию берётся с биржи "
+                         "ПОИНСТРУМЕНТНО (половина нашей выборки — нулевая)")
     ap.add_argument("--notional", type=float, default=2500)
     ap.add_argument("--compare-order", action="store_true",
                     help="прогнать оба порядка времени и сравнить (одна команда)")
@@ -131,19 +137,25 @@ def main_body(a):
     from config import SYMBOLS
     targets = SYMBOLS if a.symbol == "all" else [a.symbol]
     summary = []
-    base, runs = build_runs(a)
+    # Набор конструкций строится на КАЖДЫЙ инструмент отдельно: комиссия у них
+    # разная, и общий набор молча списывал бы чужую ставку.
+    runs_by = {t: build_runs(a, fee_for(a, t))[1] for t in targets}
+    # base несёт только параметры чтения (часы, порядок, шаг сетки) — они у
+    # всех инструментов общие.
+    base = build_runs(a, fee_for(a, targets[0]))[0]
     if len(targets) > 1:
         # один проход по файлам на все инструменты: раньше каждый читал
         # запись заново, и перебор по восьми занимал полчаса
-        results = replay_all(targets, base, {s: runs for s in targets})
+        results = replay_all(targets, base, runs_by)
         for target in targets:
             if target in results:
-                report_one(target, a, results[target], runs, summary)
+                report_one(target, a, results[target], runs_by[target], summary)
             else:
                 print(f"\n  {target}: данных нет")
     else:
         for target in targets:
-            report_one(target, a, replay_multi(target, base, runs), runs, summary)
+            report_one(target, a, replay_multi(target, base, runs_by[target]),
+                       runs_by[target], summary)
     if len(targets) > 1:
         print("\n" + "=" * 96)
         print("  СВОДКА: лучшая конструкция по каждому инструменту")
@@ -173,8 +185,9 @@ def compare_orders(a):
     collected = {}
     for mode, label in (("local", "по получению"), ("exch", "по бирже")):
         a.exch_time = (mode == "exch")
-        base, runs = build_runs(a)
-        results = replay_all(targets, base, {s: runs for s in targets})
+        runs_by = {t: build_runs(a, fee_for(a, t))[1] for t in targets}
+        base = build_runs(a, fee_for(a, targets[0]))[0]
+        results = replay_all(targets, base, runs_by)
         rows = {}
         for sym in targets:
             res = results.get(sym)
@@ -223,9 +236,19 @@ def compare_orders(a):
     print("=" * 92)
 
 
-def build_runs(a):
+def fee_for(a, symbol):
+    """Комиссия тейкера для инструмента: с биржи, если её не задали руками.
+
+    Плоская единица на все инструменты была неверна в обе стороны: BTC берёт
+    2-4 б.п., а SOL, HYPE, XRP, PEPE и ZEC не берут ничего. На нулевых
+    инструментах мы списывали 2 б.п. за круг, которых не существует.
+    """
+    return a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
+
+
+def build_runs(a, taker_bp):
     base = {"hours": a.hours, "lag_ms": a.lag_ms, "step_ms": 200,
-            "taker_bp": a.taker_bp, "size": 1.0, "order_life_s": 10,
+            "taker_bp": taker_bp, "size": 1.0, "order_life_s": 10,
             "stop_bp": 2, "target_bp": 2, "time_stop_s": 60,
             "imb_th": 0.4, "ofi_th": 0.0, "move_th": 3.0, "delta_th": 2.0,
             "order": "exch" if getattr(a, "exch_time", False) else "local"}
@@ -309,9 +332,11 @@ def report_one(symbol, a, result, runs, summary):
     # исполнений.
     order = "БИРЖЕВОЙ" if getattr(a, "exch_time", False) else "по получению"
     print("\n" + "=" * 96)
+    fee = fee_for(a, symbol)
     print(f"  {symbol}   последние {a.hours:g} ч   порядок {order}   "
           f"задержка {a.lag_ms} мс   "
-          f"выход по рынку {a.taker_bp} б.п.   номинал ${a.notional:,.0f}")
+          f"тейкер {fee:g} б.п.{' (БЕЗ КОМИССИИ)' if fee == 0 else ''}   "
+          f"номинал ${a.notional:,.0f}")
     print("=" * 96)
 
     spread_med, _ = result.pop("__spread__")

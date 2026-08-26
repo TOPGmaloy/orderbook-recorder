@@ -457,8 +457,9 @@ def main():
                     help="шаг сетки; 200 мс — родная частота пачек MEXC")
     ap.add_argument("--lag-ms", type=int, default=200,
                     help="задержка решения: раньше живой бот действовать не может")
-    ap.add_argument("--taker-bp", type=float, default=1.0,
-                    help="комиссия taker за одну сторону, б.п. (MEXC 1.0-2.0)")
+    ap.add_argument("--taker-bp", type=float, default=None,
+                    help="комиссия taker за одну сторону, б.п.; по умолчанию "
+                         "берётся с биржи для этого инструмента")
     a = ap.parse_args()
 
     if a.symbol == "all":
@@ -467,6 +468,13 @@ def main():
                     [300000, 900000],
                     ["дельта сделок 1с", "дельта сделок 5с"])
         return
+
+    # Ставка своя у каждого инструмента, и половина выборки торгуется без
+    # комиссии вовсе. Плоская единица, стоявшая здесь по умолчанию, рисовала
+    # порог издержек, которого на этих инструментах нет.
+    if a.taker_bp is None:
+        from tools.backtest import taker_fee_bp
+        a.taker_bp = taker_fee_bp(a.symbol)
 
     g = grid(a.symbol, a.step_ms, a.hours)
     n = len(g["mid"])

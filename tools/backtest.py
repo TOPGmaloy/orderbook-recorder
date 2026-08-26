@@ -46,6 +46,43 @@ from tools._io import stream, downtime
 
 # --- чтение записи ----------------------------------------------------------
 
+_DETAIL = None
+
+
+def contract_detail():
+    """Справочник контрактов MEXC, один запрос на весь прогон.
+
+    Опрашивается ТРИЖДЫ намеренно. Эндпоинт отвечает с разных узлов и даёт
+    разные ставки тейкера для одного и того же инструмента: на BTC приходит
+    то 2, то 4 б.п. Берём худшее из увиденного — ошибаться надо против себя.
+    """
+    global _DETAIL
+    if _DETAIL is not None:
+        return _DETAIL
+    merged = {}
+    try:
+        import requests
+        for _ in range(3):
+            body = requests.get("https://contract.mexc.com/api/v1/contract/detail",
+                                timeout=15).json()
+            for row in body.get("data") or []:
+                sym = row.get("symbol")
+                if not sym:
+                    continue
+                prev = merged.get(sym)
+                if prev is None:
+                    merged[sym] = row
+                else:
+                    # худшая (наибольшая) ставка из опросов
+                    if float(row.get("takerFeeRate") or 0) > \
+                       float(prev.get("takerFeeRate") or 0):
+                        merged[sym] = row
+    except Exception:
+        pass
+    _DETAIL = merged
+    return merged
+
+
 def tick_size(symbol):
     """Шаг цены инструмента. Без него выходная лимитка встаёт на цену, которой
     не существует: на BTC шаг 0.1, а «вход × 1.0002» даёт 77344.466. Очередь
@@ -53,16 +90,31 @@ def tick_size(symbol):
     легко — то есть врёт в свою пользу."""
     fallback = {"BTC_USDT": 0.1, "ETH_USDT": 0.01, "SOL_USDT": 0.01,
                 "XAU_USDT": 0.01, "XRP_USDT": 0.0001, "HYPE_USDT": 0.001}
-    try:
-        import requests
-        body = requests.get("https://contract.mexc.com/api/v1/contract/detail",
-                            timeout=15).json()
-        for row in body.get("data") or []:
-            if row.get("symbol") == symbol:
-                return float(row["priceUnit"])
-    except Exception:
-        pass
+    row = contract_detail().get(symbol)
+    if row and row.get("priceUnit"):
+        return float(row["priceUnit"])
     return fallback.get(symbol, 0.01)
+
+
+def taker_fee_bp(symbol):
+    """Комиссия тейкера по этому инструменту, в базисных пунктах.
+
+    Раньше во всех инструментах стояла плоская единица, и это было неверно
+    в обе стороны сразу. У MEXC ставка задана ПОИНСТРУМЕНТНО, и половина
+    нашей выборки торгуется вообще без комиссии (`isZeroFeeSymbol`):
+    SOL, HYPE, XRP, PEPE, ZEC — 0 б.п., а BTC берёт 2-4.
+
+    Цена ошибки прямая: круг по рынку на нулевом инструменте стоит один
+    спред (на PEPE это 0.26 б.п.), а не 2 б.п., как мы считали. Вывод
+    «преимущество структурно меньше издержек» держался именно на этой
+    двойке.
+    """
+    row = contract_detail().get(symbol)
+    if row is None:
+        return 1.0                      # сети нет — прежнее допущение
+    if row.get("isZeroFeeSymbol"):
+        return 0.0
+    return float(row.get("takerFeeRate") or 0) * 1e4
 
 
 def events(symbol, hours=None, order="local"):
