@@ -365,6 +365,48 @@ def by_day(targets, grids, a):
     print("\n" + "=" * 100)
 
 
+def lag_scan(targets, grids, a):
+    """Как преимущество тает с задержкой — проверка на честность замера.
+
+    Наша картина стакана отстаёт от матчинга примерно на 340 мс: 165 мс идёт
+    поток плюс биржа собирает стакан пачками по 200 мс. Заявка после решения
+    летит на биржу ещё около 145 мс (RTT 291 мс пополам). Значит живой бот
+    исполняется по состоянию рынка примерно на 485 мс ПОЗЖЕ того, что видел, —
+    а замер с задержкой 200 мс исполняет его на 140 мс РАНЬШЕ момента решения.
+    Для конструкции, которая гонится за движением, это смещение в свою пользу
+    ровно там, где движение и происходит.
+
+    Если преимущество держится к 600-1000 мс — оно настоящее. Если тает —
+    мы всё это время меряли фору по времени, а не сигнал.
+    """
+    cells = ((60000, 3.0), (300000, 3.0))
+    print("\n" + "=" * 100)
+    print("  КАК ПРЕИМУЩЕСТВО ТАЕТ С ЗАДЕРЖКОЙ")
+    print("  Честная задержка для этого рынка — около 500 мс, а не 200:")
+    print("  картина отстаёт от матчинга на ~340 мс, заявка летит ещё ~145 мс.")
+    print("=" * 100)
+    for h_ms, th in cells:
+        label = f"{h_ms/60000:g} мин" if h_ms >= 60000 else f"{h_ms/1000:g} с"
+        print(f"\n  ЧИСТОЕ, горизонт {label}, порог {th:g}σ")
+        print(f"    {'инструмент':<12}"
+              + "".join(f"{str(L) + ' мс':>12}" for L in LAG_SCAN))
+        for symbol in targets:
+            g = grids.get(symbol)
+            if g is None or len(g["mid"]) < 5000:
+                continue
+            fee = a.taker_bp if a.taker_bp is not None else taker_fee_bp(symbol)
+            line = f"    {symbol:<12}"
+            for lag in LAG_SCAN:
+                scan = argparse.Namespace(**vars(a))
+                scan.lag_ms = lag
+                row = next((r for r in measure(symbol, g, scan, fee)
+                            if r[0] == h_ms and r[1] == th), None)
+                line += (f"{row[5]:>12.3f}" if row and np.isfinite(row[5])
+                         else f"{'—':>12}")
+            print(line)
+    print("\n" + "=" * 100)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
