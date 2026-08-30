@@ -33,6 +33,15 @@ log = logging.getLogger("recorder")
 
 RESYNC_COOLDOWN = 2.0        # не чаще одного снимка в 2 секунды на инструмент
 
+# Пауза между ЛЮБЫМИ запросами снимка, общая на процесс. Биржа отвечает кодом
+# 510 на пачку одновременных, а у нас их ровно пачка: при старте каждый
+# инструмент просит снимок сразу, и якорный цикл раз в две минуты обходит все
+# подряд. На шестнадцати инструментах это стоило девяти потерянных снимков из
+# шестнадцати — книги собрались только со второй попытки. На плавающей
+# вселенной в полторы сотни пар не собрались бы вовсе. Полный обход при 0.3 с
+# занимает около минуты, вдвое меньше интервала между якорными снимками.
+SNAPSHOT_GAP_S = 0.3
+
 
 def exchange_ts(data):
     """Время события по часам биржи, в миллисекундах.
@@ -65,6 +74,8 @@ class Recorder:
         self.unknown_channels = set()
         self.started = time.time()
         self.stop = asyncio.Event()
+        self.snapshot_gate = asyncio.Lock()
+        self._snapshot_after = 0.0
 
     # --- приём сообщений ----------------------------------------------------
 
@@ -179,7 +190,7 @@ class Recorder:
                     break
                 await asyncio.sleep(0.05)
 
-            data, ts = await asyncio.to_thread(fetch_snapshot, symbol)
+            data, ts = await self._snapshot(symbol)
             if not data:
                 await asyncio.sleep(RESYNC_COOLDOWN)
                 event.set()
@@ -195,12 +206,26 @@ class Recorder:
             else:
                 self.resync_pending[symbol] = False
 
+    async def _snapshot(self, symbol):
+        """Снимок книги через общий ограничитель частоты.
+
+        Все запросы снимков в процессе идут через это горлышко по одному с
+        паузой: пачка одновременных получает от биржи 510 и теряется.
+        """
+        async with self.snapshot_gate:
+            wait = self._snapshot_after - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            data, ts = await asyncio.to_thread(fetch_snapshot, symbol)
+            self._snapshot_after = time.monotonic() + SNAPSHOT_GAP_S
+            return data, ts
+
     async def anchor_loop(self):
         """Якорные снимки: не применяем к живой книге, пишем для проверки сборки."""
         while not self.stop.is_set():
             await asyncio.sleep(SNAPSHOT_SECONDS)
             for symbol in SYMBOLS:
-                data, ts = await asyncio.to_thread(fetch_snapshot, symbol)
+                data, ts = await self._snapshot(symbol)
                 if data:
                     self._write_snapshot(symbol, data, ts)
                     book = self.books[symbol]
