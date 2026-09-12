@@ -28,8 +28,8 @@ import requests
 
 from config import (
     COSTMAP_GAP_S, COSTMAP_LEVELS, COSTMAP_MIN_TURNOVER, COSTMAP_NOTIONALS,
-    COSTMAP_SECONDS, COSTMAP_UNIVERSE_SECONDS, REST_DEPTH, REST_DETAIL,
-    REST_TICKER,
+    COSTMAP_RANK_SECONDS, COSTMAP_SECONDS, COSTMAP_UNIVERSE_SECONDS, REST_DEPTH,
+    REST_DETAIL, REST_KLINE, REST_TICKER, WATCH_LOOKBACK_HOURS,
 )
 
 log = logging.getLogger("costmap")
@@ -41,8 +41,17 @@ log = logging.getLogger("costmap")
 _session = requests.Session()
 _session.headers["Connection"] = "keep-alive"
 
+# Таймаут кортежем, а не числом: одно значение оставляет запрос висеть, если
+# соединение установилось и молчит. Замер на плохом канале — два запроса из
+# десяти висели по 500 с при заявленном таймауте в 20, и обход 33 пар занял
+# 46 минут вместо 25 секунд. Пять секунд на соединение и пятнадцать на ответ:
+# стакан приходит за треть секунды, но список контрактов — это 1192 записи,
+# и на плохом канале он выбирает секунды. Всё, что дольше, — сломанная связь,
+# а не медленная биржа.
+TIMEOUT = (5, 15)
 
-def _get(url, params=None, timeout=15):
+
+def _get(url, params=None, timeout=TIMEOUT):
     response = _session.get(url, params=params, timeout=timeout)
     body = response.json()
     if not body.get("success", True):
@@ -77,6 +86,18 @@ def universe(min_turnover=None):
             out.append((symbol, sizes[symbol], turnover))
     out.sort(key=lambda r: -r[2])
     return out
+
+
+def momentum(symbol, hours):
+    """Доходность пары за окно. None, если свечей не хватило."""
+    start = int(time.time()) - (hours + 2) * 3600
+    data = _get(REST_KLINE.format(symbol=symbol),
+                params={"interval": "Min60", "start": start})
+    closes = (data or {}).get("close") or []
+    if len(closes) < hours:
+        return None
+    past, now = float(closes[-hours]), float(closes[-1])
+    return now / past - 1 if past > 0 else None
 
 
 def fill(levels, notional, size):
@@ -152,6 +173,41 @@ class CostMap:
         self.writer = writer
         self.pairs = []
         self.universe_at = 0.0
+        self.ranks = {}             # символ -> (место сверху, доходность за окно)
+        self.ranks_at = 0.0
+
+    def refresh_ranks(self):
+        """Место каждой пары в рейтинге бота: 1 — лучший моментум.
+
+        Считается по тем же правилам, что у бота, и нужно, чтобы отчёт умел
+        отделять «сколько стоит вход по рынку» от «сколько стоит вход в то, что
+        бот действительно берёт».
+        """
+        scored = []
+        # Бюджет времени: рейтинг — довесок к обходу, и если канал лёг, лучше
+        # остаться с прошлым рейтингом, чем пропустить сам замер стоимости.
+        deadline = time.time() + COSTMAP_SECONDS / 2
+        for symbol, _, _ in self.pairs:
+            if time.time() > deadline:
+                log.warning("рейтинг не досчитан за отведённое время: %d из %d пар",
+                            len(scored), len(self.pairs))
+                break
+            try:
+                value = momentum(symbol, WATCH_LOOKBACK_HOURS)
+                if value is not None:
+                    scored.append((symbol, value))
+            except Exception as exc:
+                log.debug("%s: рейтинг не посчитался — %s", symbol, exc)
+            time.sleep(COSTMAP_GAP_S)
+        if len(scored) < 20:
+            log.warning("рейтинг посчитан только по %d парам — оставляю прежний",
+                        len(scored))
+            return
+        scored.sort(key=lambda r: -r[1])
+        self.ranks = {symbol: (place, value)
+                      for place, (symbol, value) in enumerate(scored, 1)}
+        self.ranks_at = time.time()
+        log.info("рейтинг обновлён по %d парам", len(scored))
 
     def refresh_universe(self):
         try:
@@ -169,12 +225,29 @@ class CostMap:
         if not self.pairs:
             return 0, 0, 0.0
 
+        if time.time() - self.ranks_at > COSTMAP_RANK_SECONDS:
+            self.refresh_ranks()
+
         started = time.time()
+        # Обход может залипнуть на сломанном канале. Прерываем на двух
+        # интервалах: лучше неполный обход вовремя, чем полный когда-нибудь.
+        deadline = started + COSTMAP_SECONDS * 2
         done = failed = 0
+        total = len(self.ranks)
         for symbol, size, turnover in self.pairs:
+            if time.time() > deadline:
+                log.warning("обход прерван по времени: не дошли до %d пар",
+                            len(self.pairs) - done - failed)
+                break
             try:
                 row = probe(symbol, size, turnover)
                 if row:
+                    place, value = self.ranks.get(symbol, (None, None))
+                    row["rank"] = place
+                    # Место снизу: у шортовой ноги свой край рейтинга, и «дно-2»
+                    # удобнее читать как 1 и 2, чем как 166 и 167.
+                    row["rank_bottom"] = (total - place + 1) if place else None
+                    row["mom_60h"] = value
                     self.writer.add(row)
                     done += 1
                 else:

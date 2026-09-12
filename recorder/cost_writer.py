@@ -40,6 +40,11 @@ _FIELDS = [
     ("ask_usd_5", pa.float64()),
     ("levels_bid", pa.int64()),
     ("levels_ask", pa.int64()),
+    # Место пары в рейтинге бота на момент замера. None, пока рейтинг не
+    # посчитан — первый обход после старта идёт без него.
+    ("rank", pa.int64()),
+    ("rank_bottom", pa.int64()),
+    ("mom_60h", pa.float64()),
 ]
 for _n in COSTMAP_NOTIONALS:
     _FIELDS += [

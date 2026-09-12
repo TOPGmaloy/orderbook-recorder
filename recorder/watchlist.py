@@ -29,10 +29,10 @@ import logging
 import time
 
 from config import (
-    BOT_STATE_PATH, REST_KLINE, WATCH_CANDIDATES, WATCH_LOOKBACK_HOURS,
+    BOT_STATE_PATH, WATCH_CANDIDATES, WATCH_LOOKBACK_HOURS,
     WATCH_MIN_TURNOVER, WATCH_TAIL_MINUTES,
 )
-from recorder.costmap import _get, universe
+from recorder.costmap import momentum, universe
 
 log = logging.getLogger("recorder")
 
@@ -59,18 +59,6 @@ def portfolio():
         log.warning("в состоянии бота нет словаря positions — формат изменился?")
         return None
     return {to_recorder(s) for s in positions}
-
-
-def momentum(symbol, hours):
-    """Доходность пары за окно. None, если свечей не хватило."""
-    start = int(time.time()) - (hours + 2) * 3600
-    data = _get(REST_KLINE.format(symbol=symbol),
-                params={"interval": "Min60", "start": start})
-    closes = (data or {}).get("close") or []
-    if len(closes) < hours:
-        return None
-    past, now = float(closes[-hours]), float(closes[-1])
-    return now / past - 1 if past > 0 else None
 
 
 def candidates(pause=0.2):

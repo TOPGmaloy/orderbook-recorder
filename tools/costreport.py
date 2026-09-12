@@ -16,6 +16,7 @@
 Запуск:  cd /root/orderbook-recorder && ./costmap
 """
 
+import json
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -26,6 +27,10 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import COSTMAP_DIR, COSTMAP_NOTIONALS
+
+# Срез рейтинга, который бот пишет при каждой ребалансировке: что он увидел и
+# что из этого взял. Нужен только для сверки — свой рейтинг карта считает сама.
+BOT_RANKING_PATH = Path("/root/trading-bot/ranking.json")
 
 TRADING_BOT_THRESHOLD = 0.15        # MAX_ENTRY_COST_PCT бота, в процентах
 
@@ -142,8 +147,67 @@ def main():
     print("\n  «книга не тянет» — доля замеров, где видимой глубины не хватило на заявку.")
     print("  Это и есть потолок: дальше растёт не цена, а невозможность войти вовсе.")
 
-    # 4. Что отсекает порог
-    print(f"\n{'=' * 92}\n4. ЧТО ОТСЕКАЕТ ПОРОГ {TRADING_BOT_THRESHOLD}%\n{'=' * 92}")
+    # 4. Что берёт бот
+    print(f"\n{'=' * 92}\n4. ЧТО СТОИТ ТО, ЧТО БОТ ДЕЙСТВИТЕЛЬНО БЕРЁТ\n{'=' * 92}")
+    ranked = [r for r in rows if r.get("rank") and r.get(key) is not None]
+    if not ranked:
+        print("  рейтинг ещё не посчитан — первый расчёт идёт через час после старта")
+    else:
+        groups = [
+            ("верх рейтинга, места 1-2 (лонги бота)", lambda r: r["rank"] <= 2),
+            ("места 3-6", lambda r: 3 <= r["rank"] <= 6),
+            ("середина", lambda r: r["rank"] > 6 and r["rank_bottom"] > 6),
+            ("места 3-6 снизу", lambda r: 3 <= r["rank_bottom"] <= 6),
+            ("низ рейтинга, места 1-2 (шорты бота)", lambda r: r["rank_bottom"] <= 2),
+        ]
+        print(f"  {'группа':<40}{'замеров':>9}{'медиана':>11}{'p90':>10}{'выше порога':>13}")
+        for label, test in groups:
+            part = [r[key] for r in ranked if test(r)]
+            if not part:
+                continue
+            over = sum(1 for c in part if c > TRADING_BOT_THRESHOLD)
+            print(f"  {label:<40}{len(part):>9}{median(part):>10.4f}%"
+                  f"{quantile(part, 0.9):>9.4f}%{over / len(part) * 100:>12.0f}%")
+        edges = [r[key] for r in ranked if r["rank"] <= 2 or r["rank_bottom"] <= 2]
+        middle = [r[key] for r in ranked if r["rank"] > 6 and r["rank_bottom"] > 6]
+        if edges and middle:
+            print(f"\n  края рейтинга против середины: {median(edges):.4f}% против "
+                  f"{median(middle):.4f}% — "
+                  f"{'дороже' if median(edges) > median(middle) else 'дешевле'} в "
+                  f"{max(median(edges), median(middle)) / max(min(median(edges), median(middle)), 1e-9):.1f} раза")
+            print("  Моментум лезет именно в края: туда только что набежали, и спред там свой.")
+
+    # 5. Сверка с тем, что бот записал сам
+    print(f"\n{'=' * 92}\n5. СВЕРКА РЕЙТИНГА С БОТОМ\n{'=' * 92}")
+    try:
+        snap = json.loads(BOT_RANKING_PATH.read_text())
+    except Exception as exc:
+        print(f"  срез рейтинга бота не прочитан ({exc}) — сверка пропущена")
+    else:
+        theirs = {row["symbol"].split("/")[0] + "_USDT": row["rank"]
+                  for row in snap.get("rows", [])}
+        latest = {}
+        for r in ranked:
+            if r["symbol"] in theirs:
+                latest.setdefault(r["symbol"], r)
+                if r["ts_us"] > latest[r["symbol"]]["ts_us"]:
+                    latest[r["symbol"]] = r
+        print(f"  срез бота от {snap.get('at')}, универс {snap.get('universe')} пар")
+        print(f"  {'пара':<18}{'у бота':>9}{'у карты':>10}{'вход':>10}")
+        for symbol, their_rank in sorted(theirs.items(), key=lambda kv: kv[1]):
+            mine = latest.get(symbol)
+            ours = mine["rank"] if mine else None
+            cost = f"{mine[key]:.4f}%" if mine and mine.get(key) is not None else "—"
+            print(f"  {symbol:<18}{their_rank:>9}{(ours if ours else '—'):>10}{cost:>10}")
+        both = [(theirs[s], latest[s]["rank"]) for s in theirs if s in latest]
+        if both:
+            close = sum(1 for a, b in both if abs(a - b) <= 3)
+            print(f"\n  совпало по месту в пределах трёх позиций: {close} из {len(both)}")
+            print("  Расхождение ожидаемо: срез бота снят в момент ребалансировки,")
+            print("  карта считает рейтинг раз в час и по своему списку пар.")
+
+    # 6. Что отсекает порог
+    print(f"\n{'=' * 92}\n6. ЧТО ОТСЕКАЕТ ПОРОГ {TRADING_BOT_THRESHOLD}%\n{'=' * 92}")
     always = [s for s, v in by_pair.items()
               if len(v) >= 5 and min(v) > TRADING_BOT_THRESHOLD]
     never = [s for s, v in by_pair.items()
