@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Короткая обёртка вокруг tools/costreport.py — отчёт по карте стоимости входа.
+#
+# Зачем обёртка: в браузерной консоли Hetzner длинная команда переносится по
+# пробелу и рвётся пополам. Здесь переносить нечего.
+cd "$(dirname "$0")" || exit 1
+mkdir -p out
+venv/bin/python tools/costreport.py "$@" 2>&1 | tee "out/costmap.txt"
+exit "${PIPESTATUS[0]}"

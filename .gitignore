@@ -1,4 +1,5 @@
 data/
+data_cost/
 venv/
 __pycache__/
 *.log

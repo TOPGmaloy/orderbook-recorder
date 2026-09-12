@@ -60,6 +60,11 @@ SYMBOLS = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XAU_USDT", "HYPE_USDT",
 WS_URL = "wss://contract.mexc.com/edge"
 REST_DEPTH = "https://contract.mexc.com/api/v1/contract/depth/{symbol}"
 REST_TIME = "https://contract.mexc.com/api/v1/contract/ping"
+# Список контрактов с размером контракта и тикеры с суточным оборотом. Нужны
+# карте стоимости: объём в стакане приходит в контрактах, а решения про универс
+# принимаются в долларах.
+REST_DETAIL = "https://contract.mexc.com/api/v1/contract/detail"
+REST_TICKER = "https://contract.mexc.com/api/v1/contract/ticker"
 
 # Сколько уровней просим в REST-снимке. Инкременты приходят по всей книге,
 # снимок нужен как якорь для сборки и как эталон для проверки целостности.
@@ -98,6 +103,34 @@ RETENTION_DAYS = 14        # сырьё старше двух недель уд�
 MIN_FREE_GB = 3.0          # ниже этого порога запись останавливается
 
 
+# --- карта стоимости входа --------------------------------------------------
+# Второй режим записи, для другой задачи. Диктофон пишет несколько инструментов
+# глубоко и часто — это нужно скальпингу, который закрыт. Моментум-боту нужно
+# обратное: весь его универс, редко, и только то, во что обходится вход.
+#
+# Зачем: исполнение съедает 27% результата бота (43.81$ из 163.69$ за прогон),
+# и до сих пор оно измерялось только в момент сделки — 201 замер по сорока
+# парам за месяц. Этого хватило, чтобы поставить порог отказа от дорогой пары,
+# и не хватает ни на что дальше: карту спреда по часам, ёмкость стратегии при
+# росте депозита, проверку того, что мгновенный стакан вообще не врёт.
+#
+# Объём: 184 пары на 288 обходов в сутки — порядка 53 тысяч строк, меньше
+# мегабайта в parquet. Полный поток стоил бы гигабайт с лишним в сутки.
+COSTMAP_DIR = Path(__file__).resolve().parent / "data_cost"
+COSTMAP_SECONDS = 300      # обход всего универса раз в пять минут
+COSTMAP_UNIVERSE_SECONDS = 3600    # список пар пересобирается раз в час
+COSTMAP_MIN_TURNOVER = 800_000     # тот же порог, что у бота в MIN_DAILY_VOLUME
+COSTMAP_LEVELS = 100       # глубины на десять тысяч долларов хватает с запасом
+# Пауза между запросами снимка. Биржа отвечает кодом 510 на пачку
+# одновременных, и у диктофона это уже стоило потерянных снимков; при 0.25 с
+# обход 184 пар занимает около минуты из пяти.
+COSTMAP_GAP_S = 0.25
+# Объёмы заявки, для которых считается настоящая цена исполнения. 150$ — слот
+# корзины сегодня, дальше — какими они станут при депозите в 5, 25 и 100 тысяч.
+COSTMAP_NOTIONALS = (150, 500, 2500, 10000)
+COSTMAP_RETENTION_DAYS = 120       # строки лёгкие, держим долго
+
+
 # --- переопределение из окружения -------------------------------------------
 # Нужно, чтобы проверять инструменты, не правя файл: например прогнать сверку
 # сборки за пару минут вместо получаса (OBR_SNAPSHOT_SECONDS=30).
@@ -108,3 +141,6 @@ ROTATE_MINUTES = int(os.getenv("OBR_ROTATE_MINUTES", ROTATE_MINUTES))
 RETENTION_DAYS = int(os.getenv("OBR_RETENTION_DAYS", RETENTION_DAYS))
 COMPRESSION_LEVEL = int(os.getenv("OBR_ZSTD", COMPRESSION_LEVEL))
 SNAPSHOT_LEVELS = int(os.getenv("OBR_SNAPSHOT_LEVELS", SNAPSHOT_LEVELS))
+COSTMAP_SECONDS = int(os.getenv("OBR_COSTMAP_SECONDS", COSTMAP_SECONDS))
+COSTMAP_MIN_TURNOVER = float(os.getenv("OBR_COSTMAP_MIN_TURNOVER", COSTMAP_MIN_TURNOVER))
+COSTMAP_RETENTION_DAYS = int(os.getenv("OBR_COSTMAP_RETENTION_DAYS", COSTMAP_RETENTION_DAYS))

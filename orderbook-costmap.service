@@ -1,0 +1,23 @@
+[Unit]
+# СПРАВОЧНАЯ КОПИЯ. Живой юнит пишет install_costmap.sh.
+#
+#     [СЕРВЕР]  cd /root/orderbook-recorder && bash install_costmap.sh
+#
+# Отдельная служба от диктофона намеренно: разные задачи, разные каталоги
+# данных, и падение одной не должно останавливать другую.
+Description=MEXC entry cost map (momentum bot universe)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/orderbook-recorder
+ExecStart=/root/orderbook-recorder/venv/bin/python /root/orderbook-recorder/run_costmap.py
+Restart=always
+RestartSec=30
+StandardOutput=append:/root/orderbook-recorder/costmap.log
+StandardError=append:/root/orderbook-recorder/costmap.log
+
+[Install]
+WantedBy=multi-user.target
