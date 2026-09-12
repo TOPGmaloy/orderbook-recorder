@@ -28,7 +28,7 @@ if [[ "${1:-}" == "--keep" ]]; then
 fi
 
 echo "==> Службы"
-for unit in orderbook-recorder orderbook-dashboard; do
+for unit in orderbook-recorder orderbook-costmap orderbook-dashboard; do
     if systemctl list-unit-files | grep -q "^${unit}"; then
         systemctl restart "$unit"
         printf '    %-22s %s\n' "$unit" "$(systemctl is-active "$unit")"
