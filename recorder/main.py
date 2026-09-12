@@ -22,11 +22,13 @@ from collections import defaultdict, deque
 
 from config import (
     SYMBOLS, SNAPSHOT_SECONDS, CLOCK_SECONDS, STATS_SECONDS,
+    FOLLOW_BOT, WATCH_REFRESH_SECONDS,
 )
 from recorder.book import (
     OrderBook, extract_version, OK, GAP, NOSYNC, SNAPSHOT_OLD, STALE, UNKNOWN,
 )
 from recorder.mexc_ws import MexcFeed, fetch_snapshot, measure_clock, now_us
+from recorder.watchlist import Watchlist
 from recorder.writer import Writer
 
 log = logging.getLogger("recorder")
@@ -65,10 +67,15 @@ def exchange_ts(data):
 class Recorder:
     def __init__(self):
         self.writer = Writer()
-        self.books = {symbol: OrderBook(symbol) for symbol in SYMBOLS}
-        self.feed = MexcFeed(SYMBOLS, on_reconnect=self._on_reconnect)
-        self.resync_needed = {symbol: asyncio.Event() for symbol in SYMBOLS}
-        self.resync_pending = {symbol: False for symbol in SYMBOLS}
+        # Состав может меняться на ходу, поэтому всё, что раньше строилось по
+        # SYMBOLS один раз, теперь заводится и убирается вместе с парой.
+        self.watchlist = Watchlist(SYMBOLS) if FOLLOW_BOT else None
+        start = list(self.watchlist.current) if self.watchlist else list(SYMBOLS)
+        self.books = {symbol: OrderBook(symbol) for symbol in start}
+        self.feed = MexcFeed(start, on_reconnect=self._on_reconnect)
+        self.resync_needed = {symbol: asyncio.Event() for symbol in start}
+        self.resync_pending = {symbol: False for symbol in start}
+        self.workers = {}
         self.counts = defaultdict(int)
         self.lags = defaultdict(lambda: deque(maxlen=3000))
         self.unknown_channels = set()
@@ -172,6 +179,55 @@ class Recorder:
         self.resync_pending[symbol] = True
         self.resync_needed[symbol].set()
 
+    # --- состав записи ------------------------------------------------------
+
+    def _attach(self, symbol):
+        """Завести книгу, событие ресинка и рабочего под новую пару."""
+        if symbol in self.books:
+            return
+        self.books[symbol] = OrderBook(symbol)
+        self.resync_needed[symbol] = asyncio.Event()
+        self.resync_pending[symbol] = False
+        self.workers[symbol] = asyncio.create_task(self.resync_worker(symbol))
+
+    def _detach(self, symbol):
+        """Убрать пару целиком: книгу, рабочего и отметки."""
+        self.books.pop(symbol, None)
+        self.resync_pending.pop(symbol, None)
+        event = self.resync_needed.pop(symbol, None)
+        if event is not None:
+            event.set()             # разбудить рабочего, чтобы он вышел сам
+        worker = self.workers.pop(symbol, None)
+        if worker is not None:
+            worker.cancel()
+
+    async def watch_loop(self):
+        """Следовать за корзиной бота: кандидаты, портфель, хвост после выхода.
+
+        Рейтинг считается полутора сотнями запросов, поэтому вся пересборка
+        уходит в отдельный поток — запись в это время идёт как шла.
+        """
+        while not self.stop.is_set():
+            try:
+                add, drop = await asyncio.to_thread(self.watchlist.refresh)
+            except Exception:
+                log.exception("состав записи не пересобрался — оставляю прежний")
+                await asyncio.sleep(WATCH_REFRESH_SECONDS)
+                continue
+
+            if add or drop:
+                for symbol in drop:
+                    self._detach(symbol)
+                for symbol in add:
+                    self._attach(symbol)
+                await self.feed.resubscribe(add=add, drop=drop)
+                for symbol in add:
+                    await self._request_resync(symbol, force=True)
+                log.info("состав записи: %s%s%s", self.watchlist.describe(),
+                         f" | добавлены {', '.join(sorted(add))}" if add else "",
+                         f" | сняты {', '.join(sorted(drop))}" if drop else "")
+            await asyncio.sleep(WATCH_REFRESH_SECONDS)
+
     # --- фоновые задачи -----------------------------------------------------
 
     async def resync_worker(self, symbol):
@@ -180,11 +236,15 @@ class Recorder:
         while not self.stop.is_set():
             await event.wait()
             event.clear()
+            if symbol not in self.books:
+                return          # пара снята с записи, пока ждали
 
             # Ждём, пока накопится хотя бы одна пачка. Без неё снимок не с чем
             # стыковать: он приходит отставшим, и первая живая пачка выглядит
             # разрывом. Ожидание — доли секунды, пачки идут раз в ~200 мс.
-            book = self.books[symbol]
+            book = self.books.get(symbol)
+            if book is None:
+                return
             for _ in range(40):
                 if book.buffer:
                     break
@@ -224,11 +284,11 @@ class Recorder:
         """Якорные снимки: не применяем к живой книге, пишем для проверки сборки."""
         while not self.stop.is_set():
             await asyncio.sleep(SNAPSHOT_SECONDS)
-            for symbol in SYMBOLS:
+            for symbol in list(self.books):
                 data, ts = await self._snapshot(symbol)
-                if data:
+                book = self.books.get(symbol)
+                if data and book is not None:
                     self._write_snapshot(symbol, data, ts)
-                    book = self.books[symbol]
                     if not book.ready and book.apply_snapshot(data) is OK:
                         self.resync_pending[symbol] = False
 
@@ -317,21 +377,25 @@ class Recorder:
     # --- запуск -------------------------------------------------------------
 
     async def run(self):
+        for symbol in list(self.books):
+            self.workers[symbol] = asyncio.create_task(self.resync_worker(symbol))
         tasks = [
             asyncio.create_task(self.feed.run(self.handle)),
-            *[asyncio.create_task(self.resync_worker(s)) for s in SYMBOLS],
             asyncio.create_task(self.anchor_loop()),
             asyncio.create_task(self.clock_loop()),
             asyncio.create_task(self.housekeeping()),
             asyncio.create_task(self.stats_loop()),
         ]
+        if self.watchlist is not None:
+            tasks.append(asyncio.create_task(self.watch_loop()))
         # Снимки не запрашиваем здесь: это сделает _on_reconnect сразу после
         # подписки. Два источника запроса на старте гонялись между собой —
         # книга успевала собраться и тут же сбрасывалась, давая ложные разрывы.
         await self.stop.wait()
-        for task in tasks:
+        for task in list(tasks) + list(self.workers.values()):
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, *self.workers.values(),
+                             return_exceptions=True)
         self.writer.flush()
         self.writer.close()
         log.info("остановлен, всего записано %d событий", self.writer.written)
@@ -350,5 +414,9 @@ async def main():
             loop.add_signal_handler(sig, recorder.stop.set)
         except NotImplementedError:
             pass
-    log.info("инструменты: %s", ", ".join(SYMBOLS))
+    if FOLLOW_BOT:
+        log.info("состав следует за корзиной бота; на старте: %s",
+                 ", ".join(sorted(recorder.books)))
+    else:
+        log.info("инструменты: %s", ", ".join(SYMBOLS))
     await recorder.run()

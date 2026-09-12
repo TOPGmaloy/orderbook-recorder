@@ -50,8 +50,11 @@ def _get(url, params=None, timeout=15):
     return body.get("data")
 
 
-def universe():
+def universe(min_turnover=None):
     """Пары выше порога оборота с размером контракта.
+
+    Порог задаётся снаружи, потому что у карты стоимости и у следящего состава
+    он свой: разойдись они, более строгий молча обрезал бы выборку второго.
 
     Размер контракта обязателен: объём в стакане приходит в контрактах, и без
     него книга не переводится в доллары. На MEXC контракт равен одной монете
@@ -70,7 +73,7 @@ def universe():
         if not symbol or not symbol.endswith("_USDT") or symbol not in sizes:
             continue
         turnover = float(row.get("amount24") or 0)
-        if turnover >= COSTMAP_MIN_TURNOVER:
+        if turnover >= (COSTMAP_MIN_TURNOVER if min_turnover is None else min_turnover):
             out.append((symbol, sizes[symbol], turnover))
     out.sort(key=lambda r: -r[2])
     return out

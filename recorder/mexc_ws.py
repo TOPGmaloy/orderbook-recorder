@@ -94,16 +94,52 @@ class MexcFeed:
     """Асинхронный итератор сообщений. Сам переподключается и переподписывается."""
 
     def __init__(self, symbols, on_reconnect=None):
-        self.symbols = symbols
+        self.symbols = list(symbols)
         self.on_reconnect = on_reconnect     # вызывается после каждой переподписки
         self.connects = 0
         self.errors = 0
         self.pending_ping_us = None   # когда отправили ping, ждущий ответа
+        # Живой сокет нужен, чтобы менять подписки на ходу: состав записи
+        # следует за корзиной бота и меняется каждый цикл. При обрыве ссылка
+        # обнуляется, а актуальный список уходит заново в _subscriptions.
+        self._socket = None
 
     def _subscriptions(self):
         for symbol in self.symbols:
             yield {"method": "sub.depth", "param": {"symbol": symbol}}
             yield {"method": "sub.deal", "param": {"symbol": symbol}}
+
+    async def resubscribe(self, add=(), drop=()):
+        """Подписаться на новые пары и отписаться от ушедших.
+
+        Список обновляется в любом случае: если сокета сейчас нет, изменения
+        уедут при следующем подключении вместе со всем набором.
+        """
+        for symbol in drop:
+            if symbol in self.symbols:
+                self.symbols.remove(symbol)
+        for symbol in add:
+            if symbol not in self.symbols:
+                self.symbols.append(symbol)
+
+        socket = self._socket
+        if socket is None:
+            return
+        try:
+            for symbol in drop:
+                await socket.send(json.dumps(
+                    {"method": "unsub.depth", "param": {"symbol": symbol}}))
+                await socket.send(json.dumps(
+                    {"method": "unsub.deal", "param": {"symbol": symbol}}))
+            for symbol in add:
+                await socket.send(json.dumps(
+                    {"method": "sub.depth", "param": {"symbol": symbol}}))
+                await socket.send(json.dumps(
+                    {"method": "sub.deal", "param": {"symbol": symbol}}))
+        except Exception as exc:
+            # Обрыв во время смены подписок не страшен: переподключение
+            # разошлёт весь актуальный список заново.
+            log.warning("смена подписок не прошла: %s", exc)
 
     async def run(self, handler):
         delay = 1
@@ -117,6 +153,7 @@ class MexcFeed:
                     delay = 1
                     log.info("соединение установлено (попытка №%d)", self.connects)
 
+                    self._socket = socket
                     for message in self._subscriptions():
                         await socket.send(json.dumps(message))
                     if self.on_reconnect:
@@ -134,6 +171,7 @@ class MexcFeed:
                             await handler(message, ts)
                     finally:
                         pinger.cancel()
+                        self._socket = None
 
             except asyncio.CancelledError:
                 raise

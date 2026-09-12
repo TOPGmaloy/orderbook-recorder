@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Короткая обёртка вокруг tools/watchtest.py — самопроверка состава записи.
+cd "$(dirname "$0")" || exit 1
+venv/bin/python tools/watchtest.py "$@"
