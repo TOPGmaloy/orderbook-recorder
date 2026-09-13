@@ -1,0 +1,20 @@
+taken: 2026-09-13 11:41:34 UTC
+commit: 670246d 2026-09-13 out.sh: отчёт диктофона считается за окно, а не по всему архиву
+
+orderbook-recorder     active  restarts: 0
+orderbook-costmap      active  restarts: 0
+orderbook-dashboard    active  restarts: 0
+
+raw capture : 7.2G
+cost map    : 14M
+
+/dev/sda1        38G  9.8G   26G  28% /
+
+days on disk:
+  raw  2026-09-09
+  raw  2026-09-10
+  raw  2026-09-11
+  raw  2026-09-12
+  raw  2026-09-13
+  cost 2026-09-12
+  cost 2026-09-13
