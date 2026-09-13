@@ -14,11 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from recorder.costmap import CostMap
 from recorder.cost_writer import CostWriter
 
+# Только поток: файл открывает systemd через StandardOutput=append:costmap.log.
+# Со своим FileHandler каждая строка попадала в журнал дважды — один раз от
+# обработчика, второй от перенаправления службы.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler(Path(__file__).resolve().parent / "costmap.log"),
-              logging.StreamHandler()],
+    handlers=[logging.StreamHandler()],
 )
 
 if __name__ == "__main__":
