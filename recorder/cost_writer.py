@@ -45,6 +45,11 @@ _FIELDS = [
     ("rank", pa.int64()),
     ("rank_bottom", pa.int64()),
     ("mom_60h", pa.float64()),
+    # Открытый интерес и ставка финансирования на момент обхода. MEXC историю OI
+    # не отдаёт, так что этот ряд — единственный способ её получить.
+    ("oi_contracts", pa.float64()),
+    ("oi_usd", pa.float64()),
+    ("funding_rate", pa.float64()),
 ]
 for _n in COSTMAP_NOTIONALS:
     _FIELDS += [

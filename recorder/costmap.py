@@ -229,6 +229,14 @@ class CostMap:
             self.refresh_ranks()
 
         started = time.time()
+        # Открытый интерес и ставка по всем парам — одним запросом тикера на
+        # обход. MEXC не отдаёт историю OI вообще, только текущее значение, так
+        # что ряд для проверки дивергенции OI можно только накопить самим.
+        try:
+            tickers = {r.get("symbol"): r for r in (_get(REST_TICKER) or [])}
+        except Exception as exc:
+            log.warning("тикер не прочитан, OI в этом обходе не будет: %s", exc)
+            tickers = {}
         # Обход может залипнуть на сломанном канале. Прерываем на двух
         # интервалах: лучше неполный обход вовремя, чем полный когда-нибудь.
         deadline = started + COSTMAP_SECONDS * 2
@@ -248,6 +256,16 @@ class CostMap:
                     # удобнее читать как 1 и 2, чем как 166 и 167.
                     row["rank_bottom"] = (total - place + 1) if place else None
                     row["mom_60h"] = value
+                    tick = tickers.get(symbol) or {}
+                    hold = tick.get("holdVol")
+                    last = tick.get("lastPrice")
+                    row["oi_contracts"] = float(hold) if hold is not None else None
+                    # В долларах: объём в контрактах, умноженный на размер контракта
+                    # и цену. Без размера контракта OI разных пар несравним.
+                    row["oi_usd"] = (float(hold) * size * float(last)
+                                     if hold is not None and last else None)
+                    row["funding_rate"] = (float(tick["fundingRate"])
+                                           if tick.get("fundingRate") is not None else None)
                     self.writer.add(row)
                     done += 1
                 else:
