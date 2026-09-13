@@ -11,7 +11,7 @@
 # restarted, no data file is rewritten.
 #
 #     bash out.sh          reports plus the tail of both logs
-#     bash out.sh --full   also the whole cost report without truncation
+#     bash out.sh x 24     same, but the capture report covers 24 hours
 
 set -u
 cd "$(dirname "$0")" || exit 1
@@ -23,8 +23,16 @@ echo "=== out.sh at $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 echo "==> reports"
 # Both tools write their own out/*.txt through tee; regenerate so the snapshot
 # carries fresh numbers rather than whatever was last run by hand.
-./costmap    > /dev/null 2>&1 && cp -f out/costmap.txt "$OUT/costmap.txt" 2>/dev/null
-./report     > /dev/null 2>&1 && cp -f out/report.txt  "$OUT/report.txt"  2>/dev/null
+#
+# report.py takes an hour window as its first argument and reads the whole
+# archive without one - that is gigabytes of raw capture, minutes of work, and
+# the same answer as the last few hours would give. The cost map is small
+# enough to read in full.
+HOURS="${2:-6}"
+echo "    cost map over everything recorded"
+./costmap > /dev/null 2>&1 && cp -f out/costmap.txt "$OUT/costmap.txt" 2>/dev/null
+echo "    capture report over the last ${HOURS}h"
+./report "$HOURS" > /dev/null 2>&1 && cp -f out/report.txt "$OUT/report.txt" 2>/dev/null
 echo "    costmap.txt $(wc -l < "$OUT/costmap.txt" 2>/dev/null || echo 0) lines"
 echo "    report.txt  $(wc -l < "$OUT/report.txt"  2>/dev/null || echo 0) lines"
 
